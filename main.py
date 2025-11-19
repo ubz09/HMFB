@@ -90,11 +90,6 @@ def update_log(account_info, status):
     except Exception as e:
         print(f"Error escribiendo log: {e}")
 
-# *** NUEVO: Función para verificar si la cuenta ya existe (opcional, ya cubierto por registered_emails) ***
-# def is_account_registered(email):
-#     """Verifica si el email ya existe en el conjunto de emails registrados."""
-#     return email.lower() in registered_emails
-
 # *** NUEVO: Función para eliminar el archivo de importación ***
 def remove_import_file(file_path):
     """Elimina el archivo de importación de cuentas."""
