@@ -208,6 +208,241 @@ async def distribute_account():
         # Si falla el envío, devolver la cuenta
         accounts_data['available'].insert(0, account_to_distribute)
 
-
+# ---------------------------------------------------------------------------------
+# ⚠️ CORRECCIÓN DE SYNTAXERROR EN LA LÍNEA 213
+# ---------------------------------------------------------------------------------
 @bot.event
-async def on_reaction_
+async def on_reaction_add(reaction, user): # <<--- CORREGIDO: Faltaban (reaction, user):
+    """Maneja las reacciones a los mensajes de distribución."""
+    if user.bot:
+        return
+
+    valid_emojis = ["✅","❌", "🚨"]
+
+    # Comprobar si la reacción está en el canal correcto y es un emoji válido
+    if reaction.message.channel.id != CHANNEL_ID or str(reaction.emoji) not in valid_emojis:
+        return
+
+    message_id = reaction.message.id
+    reacted_emoji = str(reaction.emoji)
+    user_id = user.id
+
+    # Buscar la cuenta distribuida correspondiente
+    for account in accounts_data['distributed']:
+        if account.get('message_id') == message_id:
+            # Comprobar si el usuario ya reaccionó
+            if user_id in account['reactions']['users']:
+                await reaction.remove(user)
+                return
+
+            # Registrar la nueva reacción
+            account['reactions']['users'].append(user_id)
+            account['reactions'][reacted_emoji] += 1
+            save_accounts()
+            return
+# ---------------------------------------------------------------------------------
+
+# --- Comandos ---
+
+@bot.command(name='addaccount', help='Añade una cuenta de Microsoft (Email y Password). Formato: !addaccount <correo> <contraseña>')
+@commands.has_permissions(administrator=True)
+async def add_account(ctx, email: str, password: str):
+    """
+    Añade una cuenta al inventario de forma manual.
+    """
+    email_lower = email.lower()
+
+    if email_lower in registered_emails:
+        await ctx.send(f"❌ La cuenta con correo **{email}** ya existe en el inventario.")
+        return
+
+    await ctx.send("✅ Recibida la información.")
+
+    new_account = {'username':email,'gmail':email,'password':password}
+    accounts_data['available'].append(new_account)
+    registered_emails.add(email_lower)
+    save_accounts()
+    update_log(new_account,"ADDED_MANUALLY")
+
+    # Enviar confirmación con Embed
+    embed = discord.Embed(
+        title="✅ Cuenta Añadida",
+        description="La cuenta ha sido añadida manualmente al inventario.",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="📧 Correo (Microsoft)", value=email)
+    embed.add_field(name="Inventario Total", value=f"{len(accounts_data['available'])} disponibles")
+    await ctx.send(embed=embed)
+
+@add_account.error
+async def add_account_error(ctx,error):
+    """Maneja errores específicos del comando addaccount."""
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Uso incorrecto: `!addaccount <correo_completo> <contraseña>`")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Permiso denegado. Solo administradores pueden usar este comando.")
+    else:
+        print(f"Error inesperado en add_account: {error}")
+        await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
+
+
+@bot.command(name='checkaccount', help='Valida credenciales MS, extrae datos y añade la cuenta automáticamente. Formato: !checkaccount <correo> <contraseña>')
+@commands.has_permissions(administrator=True)
+async def check_account(ctx, email: str, password: str):
+    """
+    Usa la lógica del checker para validar, extraer datos del perfil 
+    y añadir la cuenta al inventario si es válida y no es duplicada.
+    """
+    email_lower = email.lower()
+
+    if email_lower in registered_emails:
+        await ctx.send(f"❌ La cuenta **{email}** ya existe en el inventario (duplicada).")
+        return
+
+    await ctx.send(f"⏳ Iniciando chequeo y validación de la cuenta **{email}**...")
+
+    # Llamar a la función del checker de forma asíncrona
+    is_valid, result = await bot.loop.run_in_executor(None, check_and_extract_ms_account, email, password)
+
+    if is_valid:
+        # La cuenta es válida, 'result' contiene el diccionario de información
+        new_account = result
+        
+        # Añadir al inventario
+        accounts_data['available'].append(new_account)
+        registered_emails.add(email_lower)
+        save_accounts()
+        update_log(new_account,"VERIFIED_AND_ADDED")
+
+        embed = discord.Embed(
+            title="✅ Cuenta Verificada y Añadida",
+            description="La cuenta es válida, se extrajo la información y se añadió al inventario.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="📧 Correo (MS)", value=email)
+        embed.add_field(name="🔒 Contraseña", value=password)
+        embed.add_field(name="Estado", value=new_account.get('status_check', 'Verified'))
+        embed.add_field(name="Gamertag/Info Extraída", value=new_account.get('extracted_gamertag', 'N/A'), inline=False)
+        embed.set_footer(text=f"Inventario Total: {len(accounts_data['available'])} disponibles")
+        await ctx.send(embed=embed)
+        
+    else:
+        # La cuenta no es válida, 'result' contiene el mensaje de error
+        update_log({'gmail':email, 'password':password}, f"FAILED_CHECK: {result}")
+        
+        embed = discord.Embed(
+            title="❌ Fallo en la Verificación",
+            description="Las credenciales no son válidas o el proceso de chequeo falló.",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="📧 Correo", value=email)
+        embed.add_field(name="Razón del Fallo", value=result, inline=False)
+        await ctx.send(embed=embed)
+
+
+@check_account.error
+async def check_account_error(ctx, error):
+    """Maneja errores específicos del nuevo comando checkaccount."""
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Uso incorrecto: `!checkaccount <correo_completo> <contraseña>`")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Permiso denegado. Solo administradores pueden usar este comando.")
+    else:
+        print(f"Error inesperado en check_account: {error}")
+        await ctx.send("❌ Error inesperado al chequear la cuenta. Revisa la consola para más detalles.")
+
+
+@bot.command(name='importaccounts', help='Importa varias cuentas desde archivo import_accounts.txt con formato: correo:contraseña')
+@commands.has_permissions(administrator=True)
+async def import_accounts(ctx):
+    """
+    Importa cuentas desde un archivo de texto.
+    """
+    file_path = "import_accounts.txt"
+    if not os.path.exists(file_path):
+        await ctx.send(f"❌ No se encontró el archivo {file_path}. Asegúrate de crearlo con formato `correo:contraseña` por línea.")
+        return
+
+    await ctx.send("⏳ Importando cuentas...")
+    success_count = 0
+    fail_count = 0
+    duplicate_count = 0
+
+    remaining_lines = [] 
+
+    with open(file_path,'r',encoding='utf-8') as f:
+        lines = f.read().splitlines()
+        
+    for line in lines:
+        stripped_line = line.strip()
+        if not stripped_line: continue 
+
+        if stripped_line.count(":") != 1: 
+            remaining_lines.append(line)
+            fail_count += 1
+            continue 
+
+        try:
+            email, password = stripped_line.split(":", 1)
+            email_lower = email.lower()
+
+            if email_lower in registered_emails:
+                duplicate_count += 1
+                continue 
+            
+            new_account = {'username':email,'gmail':email,'password':password}
+            accounts_data['available'].append(new_account)
+            registered_emails.add(email_lower)
+            update_log(new_account,"ADDED_VIA_IMPORT")
+            success_count += 1
+
+        except Exception as e:
+            remaining_lines.append(line) 
+            print(f"Error procesando línea en import: {line}. Error: {e}")
+            fail_count += 1
+
+    save_accounts()
+
+    if remaining_lines:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(remaining_lines) + '\n')
+        await ctx.send(f"⚠️ **{fail_count}** líneas con formato incorrecto. Quedan en `{file_path}` para corrección.")
+    else:
+        remove_import_file(file_path)
+    
+    await ctx.send(
+        f"✅ Importadas **{success_count}** cuentas correctamente.\n"
+        f"🔄 Duplicadas (ya en inventario): **{duplicate_count}** (omitidas).\n"
+        f"❌ Fallidas (formato incorrecto): **{fail_count}**."
+    )
+
+
+# --- Keep Alive y Ejecución Final (Necesario para Railway) ---
+
+app = Flask('')
+@app.route('/')
+def home():
+    """Ruta simple para mantener el bot activo en entornos como Railway."""
+    return "Bot is running and ready!"
+
+def run():
+    """Ejecuta la aplicación Flask."""
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    """Inicia el thread para mantener la aplicación web activa."""
+    t = Thread(target=run)
+    t.start()
+
+# --- Ejecución Final ---
+if __name__ == '__main__':
+    keep_alive()
+    try:
+        if not TOKEN:
+            print("!!! ERROR: La variable de entorno DISCORD_TOKEN no está configurada. !!!")
+        bot.run(TOKEN)
+    except discord.LoginFailure:
+        print("*** ERROR: Token de Discord inválido ***")
+    except Exception as e:
+        print(f"*** ERROR FATAL: {e} ***")
