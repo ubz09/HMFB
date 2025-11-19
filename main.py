@@ -7,6 +7,9 @@ from datetime import datetime
 from threading import Thread # Necesario para Keep Alive
 from flask import Flask
 
+# Eliminamos la librería 'requests' ya que no haremos validación externa
+# Eliminamos 'time' ya que no se necesitan los reintentos
+
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID']) 
@@ -78,23 +81,6 @@ def update_log(account_info, status):
     except Exception as e:
         print(f"Error escribiendo log: {e}")
 
-# --- NUEVA FUNCIÓN: Verificar Unicidad ---
-def is_account_unique(email: str):
-    """Verifica si el email ya existe en 'available' o 'distributed'."""
-    # Normalizamos el email a minúsculas para una comprobación robusta
-    normalized_email = email.lower()
-    
-    # Busca en cuentas disponibles
-    if any(acc['gmail'].lower() == normalized_email for acc in accounts_data['available']):
-        return False
-        
-    # Busca en cuentas ya distribuidas
-    if any(acc['gmail'].lower() == normalized_email for acc in accounts_data['distributed']):
-        return False
-        
-    return True
-# ------------------------------------------
-
 # --- Tasks y Eventos ---
 
 @bot.event
@@ -114,26 +100,4 @@ async def distribute_account():
     if not channel or not accounts_data['available']:
         return
 
-    # Sacar la primera cuenta disponible
-    account_to_distribute = accounts_data['available'].pop(0)
-
-    required_keys = ['gmail', 'password']
-    # Comprobamos solo el correo y la contraseña
-    if not all(key in account_to_distribute for key in required_keys):
-        accounts_data['available'].insert(0, account_to_distribute)
-        return
-
-    # Crear el Embed para la distribución
-    embed = discord.Embed(
-        title=f"✨ Cuenta Disponible | Correo: {account_to_distribute['gmail']} ✨",
-        description="¡Se ha liberado una cuenta! Reacciona para indicar su estado:",
-        color=discord.Color.dark_green()
-    )
-    embed.add_field(name="📧 Correo (Microsoft)", value=f"`{account_to_distribute['gmail']}`", inline=False)
-    embed.add_field(name="🔒 Contraseña", value=f"`{account_to_distribute['password']}`", inline=False)
-    embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Sirve/Bloqueada | {len(accounts_data['available'])} restantes.")
-
-    try:
-        # Enviar el mensaje y añadir las tres reacciones
-        message = await channel.send(embed=embed)
-        await message.add_reaction("✅")
+    # Sacar la primera cuenta
