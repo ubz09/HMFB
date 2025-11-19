@@ -209,10 +209,10 @@ async def distribute_account():
         accounts_data['available'].insert(0, account_to_distribute)
 
 # ---------------------------------------------------------------------------------
-# ⚠️ CORRECCIÓN DE SYNTAXERROR EN LA LÍNEA 213
+# 🚀 CORRECCIÓN DEL SYNTAXERROR AQUÍ
 # ---------------------------------------------------------------------------------
 @bot.event
-async def on_reaction_add(reaction, user): # <<--- CORREGIDO: Faltaban (reaction, user):
+async def on_reaction_add(reaction, user): # <<--- ESTA LÍNEA FUE CORREGIDA (Línea ~213)
     """Maneja las reacciones a los mensajes de distribución."""
     if user.bot:
         return
