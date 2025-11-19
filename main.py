@@ -4,11 +4,8 @@ from discord.ext import commands, tasks
 import json
 import os
 from datetime import datetime
-from threading import Thread # Necesario para Keep Alive
+from threading import Thread
 from flask import Flask
-
-# Eliminamos la librería 'requests' ya que no haremos validación externa
-# Eliminamos 'time' ya que no se necesitan los reintentos
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
@@ -43,17 +40,29 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Cargar los datos de las cuentas al iniciar
 accounts_data = {'available': [], 'distributed': []}
+# *** NUEVO: Conjunto para una búsqueda rápida de emails ya registrados ***
+registered_emails = set()
 
 # --- Funciones Auxiliares ---
 
 def load_accounts():
-    """Carga los datos de las cuentas desde el archivo JSON."""
-    global accounts_data
+    """Carga los datos de las cuentas desde el archivo JSON y actualiza el conjunto de emails registrados."""
+    global accounts_data, registered_emails
     try:
         with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if 'available' in data and 'distributed' in data:
                 accounts_data = data
+                # Reconstruir el conjunto de emails registrados
+                registered_emails.clear()
+                # Las cuentas ya distribuidas son las que actúan como "logs"
+                for account in accounts_data['distributed']:
+                    if 'gmail' in account:
+                        registered_emails.add(account['gmail'].lower())
+                # También registramos las cuentas que aún están en 'available'
+                for account in accounts_data['available']:
+                    if 'gmail' in account:
+                        registered_emails.add(account['gmail'].lower())
                 return True
             else:
                 return False
@@ -81,7 +90,21 @@ def update_log(account_info, status):
     except Exception as e:
         print(f"Error escribiendo log: {e}")
 
-# --- Tasks y Eventos ---
+# *** NUEVO: Función para verificar si la cuenta ya existe (opcional, ya cubierto por registered_emails) ***
+# def is_account_registered(email):
+#     """Verifica si el email ya existe en el conjunto de emails registrados."""
+#     return email.lower() in registered_emails
+
+# *** NUEVO: Función para eliminar el archivo de importación ***
+def remove_import_file(file_path):
+    """Elimina el archivo de importación de cuentas."""
+    try:
+        os.remove(file_path)
+        print(f"Archivo de importación eliminado: {file_path}")
+    except Exception as e:
+        print(f"Error al eliminar archivo {file_path}: {e}")
+
+# --- Tasks y Eventos (Sin cambios relevantes aquí) ---
 
 @bot.event
 async def on_ready():
@@ -110,16 +133,13 @@ async def distribute_account():
         return
 
     # Crear el Embed para la distribución
-    # *** CAMBIO: El título usa el correo como identificador principal ***
     embed = discord.Embed(
         title=f"✨ Cuenta Disponible | Correo: {account_to_distribute['gmail']} ✨",
         description="¡Se ha liberado una cuenta! Reacciona para indicar su estado:",
         color=discord.Color.dark_green()
     )
-    # *** CAMBIO: Se eliminó el campo del Nickname ***
     embed.add_field(name="📧 Correo (Microsoft)", value=f"`{account_to_distribute['gmail']}`", inline=False)
     embed.add_field(name="🔒 Contraseña", value=f"`{account_to_distribute['password']}`", inline=False)
-    # *** CAMBIO: Se añadió la nueva reacción al texto de pie de página ***
     embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Sirve/Bloqueada | {len(accounts_data['available'])} restantes.")
 
     try:
@@ -127,21 +147,24 @@ async def distribute_account():
         message = await channel.send(embed=embed)
         await message.add_reaction("✅")
         await message.add_reaction("❌")
-        await message.add_reaction("🚨") # Nueva reacción
+        await message.add_reaction("🚨")
 
-        # Guardar la información de la distribución
+        # Guardar la información de la distribución (Esto ya actúa como el "log" solicitado)
         account_data_distributed = account_to_distribute.copy()
         account_data_distributed['distribution_date'] = datetime.now().isoformat()
         account_data_distributed['message_id'] = message.id
-        # *** CAMBIO: Inicializar la nueva reacción en los datos ***
         account_data_distributed['reactions'] = {'✅':0,'❌':0,'🚨':0,'users':[]}
         accounts_data['distributed'].append(account_data_distributed)
-
+        
+        # *** NUEVO: La cuenta ya está en 'distributed', no se requiere un log JSON adicional.
+        # Solo se requiere actualizar el log de texto y guardar los datos principales.
         save_accounts()
         update_log(account_to_distribute, "DISTRIBUTED")
+        
     except:
         # Si falla el envío (ej. el bot no tiene permisos), devolver la cuenta
         accounts_data['available'].insert(0, account_to_distribute)
+
 
 @bot.event
 async def on_reaction_add(reaction, user):
@@ -149,7 +172,6 @@ async def on_reaction_add(reaction, user):
     if user.bot:
         return
 
-    # *** CAMBIO: Añadida la nueva reacción 🚨 ***
     valid_emojis = ["✅","❌", "🚨"]
 
     # Comprobar si la reacción está en el canal correcto y es un emoji válido
@@ -182,6 +204,12 @@ async def add_account(ctx, email: str, password: str):
     """
     Añade una cuenta al inventario, usando el email como identificador principal.
     """
+    email_lower = email.lower()
+
+    # *** NUEVO: Chequeo de duplicados al añadir manualmente ***
+    if email_lower in registered_emails:
+        await ctx.send(f"❌ La cuenta con correo **{email}** ya existe en el inventario.")
+        return
 
     await ctx.send("✅ Recibida la información.")
 
@@ -189,6 +217,7 @@ async def add_account(ctx, email: str, password: str):
     # pero ahora guarda el email.
     new_account = {'username':email,'gmail':email,'password':password}
     accounts_data['available'].append(new_account)
+    registered_emails.add(email_lower) # Añadir al set
     save_accounts()
     update_log(new_account,"ADDED")
 
@@ -203,10 +232,14 @@ async def add_account(ctx, email: str, password: str):
     embed.add_field(name="Inventario Total", value=f"{len(accounts_data['available'])} disponibles")
     await ctx.send(embed=embed)
 
+
 @bot.command(name='importaccounts', help='Importa varias cuentas desde archivo import_accounts.txt con formato: correo:contraseña')
 @commands.has_permissions(administrator=True)
 async def import_accounts(ctx):
-    """Importa cuentas desde un archivo de texto con formato email:contraseña."""
+    """
+    Importa cuentas desde un archivo de texto con formato email:contraseña, 
+    evitando duplicados y eliminando el archivo después de un procesamiento exitoso.
+    """
     file_path = "import_accounts.txt"
     if not os.path.exists(file_path):
         await ctx.send(f"❌ No se encontró el archivo {file_path}. Asegúrate de crearlo con formato `correo:contraseña` por línea.")
@@ -215,27 +248,65 @@ async def import_accounts(ctx):
     await ctx.send("⏳ Importando cuentas...")
     success_count = 0
     fail_count = 0
+    duplicate_count = 0
+
+    # Lista para guardar las líneas no procesadas (por formato incorrecto)
+    remaining_lines = [] 
 
     with open(file_path,'r',encoding='utf-8') as f:
         lines = f.read().splitlines()
-        for line in lines:
-            if line.count(":") != 1: continue # Debe haber exactamente un ':' (email:pass)
+        
+    for line in lines:
+        stripped_line = line.strip()
+        if not stripped_line: continue # Saltar líneas vacías
 
-            try:
-                # Separar los dos valores
-                email, password = line.strip().split(":", 1)
+        if stripped_line.count(":") != 1: 
+            remaining_lines.append(line)
+            fail_count += 1
+            continue # Debe haber exactamente un ':' (email:pass)
 
-                # Usamos el email como 'username' para el seguimiento interno
-                new_account = {'username':email,'gmail':email,'password':password}
-                accounts_data['available'].append(new_account)
-                update_log(new_account,"ADDED")
-                success_count += 1
-            except Exception as e:
-                print(f"Error procesando línea en import: {line}. Error: {e}")
-                fail_count += 1
+        try:
+            # Separar los dos valores
+            email, password = stripped_line.split(":", 1)
+            email_lower = email.lower()
+
+            # *** NUEVO: Lógica para evitar duplicados ***
+            if email_lower in registered_emails:
+                duplicate_count += 1
+                continue # Saltar duplicados
+            
+            # Usamos el email como 'username' para el seguimiento interno
+            new_account = {'username':email,'gmail':email,'password':password}
+            accounts_data['available'].append(new_account)
+            registered_emails.add(email_lower) # Añadir al set
+            update_log(new_account,"ADDED")
+            success_count += 1
+
+        except Exception as e:
+            # Si hay una excepción, la línea no se procesó correctamente
+            remaining_lines.append(line) 
+            print(f"Error procesando línea en import: {line}. Error: {e}")
+            fail_count += 1
 
     save_accounts()
-    await ctx.send(f"✅ Importadas **{success_count}** cuentas correctamente.\n❌ Fallidas (formato incorrecto): **{fail_count}**")
+
+    # *** NUEVO: Eliminar o actualizar el archivo import_accounts.txt ***
+    # Si quedan líneas sin procesar (por formato), se reescribe el archivo.
+    # Si no queda ninguna, se elimina el archivo.
+    if remaining_lines:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(remaining_lines) + '\n')
+        await ctx.send(f"⚠️ **{fail_count}** líneas con formato incorrecto. Quedan en `{file_path}` para corrección.")
+    else:
+        # Si todo se procesó o se saltó por duplicado, eliminamos el archivo.
+        remove_import_file(file_path)
+    
+    await ctx.send(
+        f"✅ Importadas **{success_count}** cuentas correctamente.\n"
+        f"🔄 Duplicadas (ya en inventario): **{duplicate_count}** (omitidas).\n"
+        f"❌ Fallidas (formato incorrecto): **{fail_count}**."
+    )
+
 
 @add_account.error
 async def add_account_error(ctx,error):
@@ -250,6 +321,7 @@ async def add_account_error(ctx,error):
         await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
 
 # --- Keep Alive para Replit ---
+# ... (El resto del código de Keep Alive y Ejecución Final permanece sin cambios)
 
 app = Flask('')
 @app.route('/')
