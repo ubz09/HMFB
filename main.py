@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# ** IMPORTANTE: Este código requiere la librería 'requests'. **
+# ** Instálala ejecutando: pip install requests **
+
 import discord
 from discord.ext import commands, tasks
 import json
@@ -6,7 +9,7 @@ import os
 from datetime import datetime
 from threading import Thread
 from flask import Flask
-# 🚨 IMPORTACIONES ADICIONALES NECESARIAS PARA LA FUNCIÓN (Aun si es simulada)
+# 🚨 IMPORTACIONES ADICIONALES NECESARIAS PARA LA FUNCIÓN
 import requests
 import re
 from urllib.parse import urlparse, parse_qs
@@ -46,7 +49,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Cargar los datos de las cuentas al iniciar
 accounts_data = {'available': [], 'distributed': []}
-# *** NUEVO: Conjunto para una búsqueda rápida de emails ya registrados ***
+# *** Conjunto para una búsqueda rápida de emails ya registrados ***
 registered_emails = set()
 
 # --- Funciones Auxiliares ---
@@ -61,11 +64,9 @@ def load_accounts():
                 accounts_data = data
                 # Reconstruir el conjunto de emails registrados
                 registered_emails.clear()
-                # Las cuentas ya distribuidas son las que actúan como "logs"
                 for account in accounts_data['distributed']:
                     if 'gmail' in account:
                         registered_emails.add(account['gmail'].lower())
-                # También registramos las cuentas que aún están en 'available'
                 for account in accounts_data['available']:
                     if 'gmail' in account:
                         registered_emails.add(account['gmail'].lower())
@@ -85,7 +86,6 @@ def save_accounts():
 
 def update_log(account_info, status):
     """Añade una entrada al archivo de registro (log)."""
-    # Usamos el 'gmail' (ahora cualquier email) como identificador principal en el log
     log_entry = (
         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"STATUS: {status} | Email: {account_info['gmail']} | Pass: {account_info['password']}\n"
@@ -133,7 +133,7 @@ def obtener_nombre_de_minecraft(email, password):
 # 🚨 FIN DE FUNCIÓN SIMULADA 🚨
 
 
-# --- Tasks y Eventos (Sin cambios relevantes aquí) ---
+# --- Tasks y Eventos ---
 
 @bot.event
 async def on_ready():
@@ -156,7 +156,6 @@ async def distribute_account():
     account_to_distribute = accounts_data['available'].pop(0)
 
     required_keys = ['gmail', 'password']
-    # Comprobamos solo el correo y la contraseña
     if not all(key in account_to_distribute for key in required_keys):
         accounts_data['available'].insert(0, account_to_distribute)
         return
@@ -173,7 +172,7 @@ async def distribute_account():
     embed.add_field(name="🎮 Nombre de Minecraft", value=f"`{mc_username}`", inline=False)
     embed.add_field(name="📧 Correo (Microsoft)", value=f"`{account_to_distribute['gmail']}`", inline=False)
     embed.add_field(name="🔒 Contraseña", value=f"`{account_to_distribute['password']}`", inline=False)
-    embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Sirve/Bloqueada | {len(accounts_data['available'])} restantes.")
+    embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Servible | {len(accounts_data['available'])} restantes.")
 
     try:
         # Enviar el mensaje y añadir las tres reacciones
@@ -237,7 +236,7 @@ async def add_account(ctx, email: str, password: str):
     """
     email_lower = email.lower()
 
-    # *** NUEVO: Chequeo de duplicados al añadir manualmente ***
+    # *** Chequeo de duplicados al añadir manualmente ***
     if email_lower in registered_emails:
         await ctx.send(f"❌ La cuenta con correo **{email}** ya existe en el inventario.")
         return
@@ -314,13 +313,12 @@ async def import_accounts(ctx):
             email, password = stripped_line.split(":", 1)
             email_lower = email.lower()
 
-            # *** NUEVO: Lógica para evitar duplicados ***
+            # *** Lógica para evitar duplicados ***
             if email_lower in registered_emails:
                 duplicate_count += 1
                 continue # Saltar duplicados
             
-            # 🚨 En la importación masiva no se realiza la verificación por rendimiento.
-            # Se asume que el campo 'username' será el correo o un marcador.
+            # En la importación masiva no se realiza la verificación por rendimiento.
             mc_username = "Pendiente" 
             
             # Usamos el email como 'username' para el seguimiento interno
@@ -338,9 +336,7 @@ async def import_accounts(ctx):
 
     save_accounts()
 
-    # *** NUEVO: Eliminar o actualizar el archivo import_accounts.txt ***
-    # Si quedan líneas sin procesar (por formato), se reescribe el archivo.
-    # Si no queda ninguna, se elimina el archivo.
+    # *** Eliminar o actualizar el archivo import_accounts.txt ***
     if remaining_lines:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(remaining_lines) + '\n')
@@ -369,7 +365,6 @@ async def add_account_error(ctx,error):
         await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
 
 # --- Keep Alive para Replit ---
-# ... (El resto del código de Keep Alive y Ejecución Final permanece sin cambios)
 
 app = Flask('')
 @app.route('/')
@@ -379,7 +374,6 @@ def home():
 
 def run():
     """Ejecuta la aplicación Flask."""
-    # Cambiado el puerto a 8080 por compatibilidad con algunos hosts
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
