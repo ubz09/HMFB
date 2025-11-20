@@ -15,7 +15,7 @@ import uuid
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
-DISTRIBUTION_INTERVAL_MINUTES = 30.0
+DISTRIBUTION_INTERVAL_MINUTES = 10.0
 
 # --- Rutas de Archivos ---
 DATA_DIR = 'data'
