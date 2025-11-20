@@ -11,7 +11,6 @@ import aiohttp
 import re
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
-import uuid
 
 # Cargar variables de entorno
 load_dotenv()
@@ -28,9 +27,6 @@ if not TOKEN:
 if CHANNEL_ID == 0:
     print("❌ ERROR: CHANNEL_ID no está configurado")
     exit(1)
-
-# URLs para autenticación
-SFTTAG_URL = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 
 # --- Rutas de Archivos ---
 DATA_DIR = 'data'
@@ -68,59 +64,90 @@ class AccountBot(commands.Bot):
 
 bot = AccountBot()
 
-# --- Funciones de Autenticación Microsoft (Completas) ---
+# --- Funciones de Autenticación Microsoft Mejoradas ---
 
-async def get_urlPost_sFTTag(session):
-    """Obtiene URL y token para autenticación Microsoft"""
+async def microsoft_login(session, email, password):
+    """Autenticación mejorada con Microsoft"""
     try:
-        async with session.get(SFTTAG_URL, timeout=aiohttp.ClientTimeout(total=15)) as response:
-            text = await response.text()
-            match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
-            if match:
-                sFTTag = match.group(1)
-                match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
-                if match:
-                    return match.group(1), sFTTag
-    except Exception as e:
-        print(f"❌ Error obteniendo URL de autenticación: {e}")
-    return None, None
-
-async def get_xbox_rps(session, email, password, urlPost, sFTTag):
-    """Autentica con Microsoft y obtiene token"""
-    try:
-        data = {
-            'login': email, 
-            'loginfmt': email, 
-            'passwd': password, 
-            'PPFT': sFTTag
-        }
+        # Paso 1: Obtener página de login
+        auth_url = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
         
-        async with session.post(
-            urlPost, 
-            data=data, 
-            headers={'Content-Type': 'application/x-www-form-urlencoded'},
-            allow_redirects=True,
-            timeout=aiohttp.ClientTimeout(total=15)
-        ) as response:
-            if '#' in str(response.url) and str(response.url) != SFTTAG_URL:
-                token = parse_qs(urlparse(str(response.url)).fragment).get('access_token', ["None"])[0]
-                if token != "None":
-                    return token
-            
+        async with session.get(auth_url) as response:
             text = await response.text()
             
-            if any(value in text for value in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt"]):
-                return "2FA_REQUIRED"
-            elif any(value in text.lower() for value in ["password is incorrect", "account doesn't exist", "sign in to your microsoft account"]):
-                return "INVALID_CREDENTIALS"
-                
+            # Extraer PPFT token
+            ppft_match = re.search(r'value="([^"]*)" id="i0327"', text)
+            if not ppft_match:
+                ppft_match = re.search(r'name="PPFT" value="([^"]*)"', text)
+            
+            if not ppft_match:
+                return {"success": False, "error": "No se pudo obtener token de autenticación"}
+            
+            ppft = ppft_match.group(1)
+            
+            # Extraer URL Post
+            url_post_match = re.search(r'urlPost:\'([^\']*)\'', text)
+            if not url_post_match:
+                return {"success": False, "error": "No se pudo obtener URL de envío"}
+            
+            url_post = url_post_match.group(1)
+
+        # Paso 2: Enviar credenciales
+        login_data = {
+            'login': email,
+            'loginfmt': email,
+            'passwd': password,
+            'PPFT': ppft,
+            'type': '11',
+            'NewUser': '1',
+            'LoginOptions': '1',
+            'i3': '36728',
+            'm1': '768',
+            'm2': '1184',
+            'm3': '0',
+            'i12': '1',
+            'i17': '0',
+            'i18': '__Login_Strings|1,__Login_Core|1,'
+        }
+
+        async with session.post(
+            url_post,
+            data=login_data,
+            allow_redirects=False,
+            headers={
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        ) as response:
+            if response.status == 302:  # Redirección exitosa
+                location = response.headers.get('Location', '')
+                if 'access_token' in location:
+                    # Extraer token de la URL
+                    parsed = urlparse(location)
+                    fragment = parse_qs(parsed.fragment)
+                    access_token = fragment.get('access_token', [None])[0]
+                    if access_token:
+                        return {"success": True, "access_token": access_token}
+            
+            # Leer respuesta para detectar errores
+            text = await response.text()
+            
+            if "password is incorrect" in text.lower():
+                return {"success": False, "error": "Contraseña incorrecta"}
+            elif "account doesn't exist" in text.lower():
+                return {"success": False, "error": "La cuenta no existe"}
+            elif "recover" in text.lower():
+                return {"success": False, "error": "Autenticación de 2 factores requerida"}
+            elif "signed in too many times" in text.lower():
+                return {"success": False, "error": "Demasiados intentos fallidos, cuenta temporalmente bloqueada"}
+            else:
+                return {"success": False, "error": "Error desconocido en autenticación"}
+
     except Exception as e:
-        return f"ERROR: {str(e)}"
-    
-    return "UNKNOWN_ERROR"
+        return {"success": False, "error": f"Error de conexión: {str(e)}"}
 
 async def get_minecraft_profile(session, access_token):
-    """Obtiene el perfil completo de Minecraft"""
+    """Obtiene información del perfil de Minecraft"""
     try:
         headers = {'Authorization': f'Bearer {access_token}'}
         
@@ -141,109 +168,22 @@ async def get_minecraft_profile(session, access_token):
                     if entitle_response.status == 200:
                         entitlements_data = await entitle_response.json()
                 
-                # Verificar capa de Optifine
-                optifine_cape = await check_optifine_cape(session, profile_data.get('name'))
-                
                 return {
                     'profile': profile_data,
                     'name_change': name_change_data,
-                    'entitlements': entitlements_data,
-                    'optifine_cape': optifine_cape
+                    'entitlements': entitlements_data
                 }
+            elif response.status == 404:
+                return {"success": False, "error": "Cuenta sin Minecraft"}
+            else:
+                return {"success": False, "error": f"Error API Minecraft: {response.status}"}
                 
     except Exception as e:
-        print(f"❌ Error obteniendo perfil Minecraft: {e}")
-    
-    return None
-
-async def check_optifine_cape(session, username):
-    """Verifica si el usuario tiene capa de Optifine"""
-    if not username:
-        return "Unknown"
-    
-    try:
-        async with session.get(f'http://s.optifine.net/capes/{username}.png') as response:
-            if response.status == 404:
-                return "No"
-            elif response.status == 200:
-                return "Yes"
-    except:
-        pass
-    
-    return "Unknown"
-
-async def get_xbox_live_token(session, microsoft_token):
-    """Obtiene token de Xbox Live"""
-    try:
-        data = {
-            "Properties": {
-                "AuthMethod": "RPS",
-                "SiteName": "user.auth.xboxlive.com",
-                "RpsTicket": f"d={microsoft_token}"
-            },
-            "RelyingParty": "http://auth.xboxlive.com",
-            "TokenType": "JWT"
-        }
-        
-        async with session.post(
-            'https://user.auth.xboxlive.com/user/authenticate',
-            json=data,
-            headers={'Content-Type': 'application/json'}
-        ) as response:
-            if response.status == 200:
-                return await response.json()
-    except Exception as e:
-        print(f"❌ Error obteniendo token Xbox Live: {e}")
-    
-    return None
-
-async def get_xsts_token(session, xbox_token):
-    """Obtiene token XSTS"""
-    try:
-        data = {
-            "Properties": {
-                "SandboxId": "RETAIL",
-                "UserTokens": [xbox_token]
-            },
-            "RelyingParty": "rp://api.minecraftservices.com/",
-            "TokenType": "JWT"
-        }
-        
-        async with session.post(
-            'https://xsts.auth.xboxlive.com/xsts/authorize',
-            json=data,
-            headers={'Content-Type': 'application/json'}
-        ) as response:
-            if response.status == 200:
-                return await response.json()
-    except Exception as e:
-        print(f"❌ Error obteniendo token XSTS: {e}")
-    
-    return None
-
-async def get_minecraft_token(session, uhs, xsts_token):
-    """Obtiene token de Minecraft"""
-    try:
-        data = {
-            'identityToken': f"XBL3.0 x={uhs};{xsts_token}"
-        }
-        
-        async with session.post(
-            'https://api.minecraftservices.com/authentication/login_with_xbox',
-            json=data,
-            headers={'Content-Type': 'application/json'}
-        ) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get('access_token')
-    except Exception as e:
-        print(f"❌ Error obteniendo token Minecraft: {e}")
-    
-    return None
+        return {"success": False, "error": f"Error obteniendo perfil: {str(e)}"}
 
 async def verify_microsoft_account(email, password):
     """
-    Verifica una cuenta de Microsoft y obtiene información completa.
+    Verifica una cuenta de Microsoft con manejo mejorado de errores
     """
     try:
         # Validación básica
@@ -259,132 +199,86 @@ async def verify_microsoft_account(email, password):
                 "error": "La contraseña no puede estar vacía"
             }
 
-        # Crear sesión
-        connector = aiohttp.TCPConnector(verify_ssl=False)
+        # Configurar sesión HTTP
         timeout = aiohttp.ClientTimeout(total=30)
+        connector = aiohttp.TCPConnector(verify_ssl=False)
         
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            # Paso 1: Obtener URL de autenticación
-            urlPost, sFTTag = await get_urlPost_sFTTag(session)
-            if not urlPost:
-                return {
-                    "success": False,
-                    "error": "No se pudo obtener URL de autenticación"
-                }
-
-            # Paso 2: Autenticar con Microsoft
-            microsoft_token = await get_xbox_rps(session, email, password, urlPost, sFTTag)
+        async with aiohttp.ClientSession(
+            connector=connector, 
+            timeout=timeout,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+        ) as session:
             
-            if microsoft_token == "INVALID_CREDENTIALS":
-                return {
-                    "success": False,
-                    "error": "Credenciales inválidas"
-                }
-            elif microsoft_token == "2FA_REQUIRED":
-                return {
-                    "success": False,
-                    "error": "Autenticación de 2 factores requerida"
-                }
-            elif microsoft_token.startswith("ERROR"):
-                return {
-                    "success": False,
-                    "error": microsoft_token
-                }
-            elif microsoft_token == "UNKNOWN_ERROR":
-                return {
-                    "success": False,
-                    "error": "Error desconocido en autenticación"
-                }
-
-            # Paso 3: Obtener token Xbox Live
-            xbox_data = await get_xbox_live_token(session, microsoft_token)
-            if not xbox_data:
-                return {
-                    "success": False,
-                    "error": "Error obteniendo token Xbox Live"
-                }
-
-            xbox_token = xbox_data.get('Token')
-            uhs = xbox_data['DisplayClaims']['xui'][0]['uhs']
-
-            # Paso 4: Obtener token XSTS
-            xsts_data = await get_xsts_token(session, xbox_token)
-            if not xsts_data:
-                return {
-                    "success": False,
-                    "error": "Error obteniendo token XSTS"
-                }
-
-            xsts_token = xsts_data.get('Token')
-
-            # Paso 5: Obtener token Minecraft
-            minecraft_token = await get_minecraft_token(session, uhs, xsts_token)
-            if not minecraft_token:
-                return {
-                    "success": False,
-                    "error": "Error obteniendo token Minecraft"
-                }
-
-            # Paso 6: Obtener perfil completo
-            profile_info = await get_minecraft_profile(session, minecraft_token)
+            # Paso 1: Login con Microsoft
+            login_result = await microsoft_login(session, email, password)
             
-            if not profile_info:
+            if not login_result["success"]:
+                return login_result
+
+            access_token = login_result["access_token"]
+
+            # Paso 2: Obtener información de Minecraft
+            profile_result = await get_minecraft_profile(session, access_token)
+            
+            if isinstance(profile_result, dict) and "success" in profile_result and not profile_result["success"]:
+                # Cuenta válida pero sin Minecraft
                 return {
                     "success": True,
                     "email": email,
                     "password": password,
                     "has_minecraft": False,
-                    "message": "✅ Cuenta verificada - Sin Minecraft"
+                    "message": "✅ Cuenta Microsoft válida - Sin Minecraft",
+                    "microsoft_token": access_token
                 }
 
-            # Procesar información del perfil
-            profile_data = profile_info['profile']
-            name_change_data = profile_info['name_change']
-            entitlements_data = profile_info['entitlements']
-            
+            # Cuenta con Minecraft - Procesar información
+            profile_data = profile_result['profile']
+            name_change_data = profile_result['name_change']
+            entitlements_data = profile_result['entitlements']
+
             # Determinar tipo de cuenta
-            account_type = "Normal"
+            account_type = "Microsoft Account"
             games_owned = []
             
-            if entitlements_data:
-                items = entitlements_data.get('items', [])
-                for item in items:
+            if entitlements_data and 'items' in entitlements_data:
+                for item in entitlements_data['items']:
                     name = item.get('name', '')
-                    if 'game_pass_ultimate' in name:
-                        account_type = "Xbox Game Pass Ultimate"
-                    elif 'game_pass_pc' in name:
-                        account_type = "Xbox Game Pass"
-                    elif 'minecraft_bedrock' in name:
-                        games_owned.append("Minecraft Bedrock")
-                    elif 'legends' in name:
-                        games_owned.append("Minecraft Legends")
-                    elif 'dungeons' in name:
-                        games_owned.append("Minecraft Dungeons")
+                    if 'game_pass' in name:
+                        if 'ultimate' in name:
+                            account_type = "Xbox Game Pass Ultimate"
+                        else:
+                            account_type = "Xbox Game Pass"
+                    elif 'minecraft' in name:
+                        if 'bedrock' in name:
+                            games_owned.append("Minecraft Bedrock")
+                        elif 'legends' in name:
+                            games_owned.append("Minecraft Legends")
+                        elif 'dungeons' in name:
+                            games_owned.append("Minecraft Dungeons")
 
-            # Información de capas Minecraft
+            # Información de capas
             capes = []
             if 'capes' in profile_data:
                 for cape in profile_data['capes']:
                     capes.append(cape.get('alias', 'Unknown'))
 
             # Información de cambio de nombre
-            name_changeable = "Unknown"
+            name_changeable = "No"
             if name_change_data:
-                name_changeable = name_change_data.get('nameChangeAllowed', False)
+                name_changeable = "Sí" if name_change_data.get('nameChangeAllowed', False) else "No"
 
             # Fecha de creación
-            creation_date = "Unknown"
+            creation_date = "Desconocida"
             if name_change_data and 'createdAt' in name_change_data:
                 try:
-                    created_at = name_change_data['createdAt']
-                    # Formatear fecha
                     from datetime import datetime
+                    created_at = name_change_data['createdAt']
                     dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                    creation_date = dt.strftime("%A, %d de %B de %Y, %H:%M").lower()
-                    # Traducir (simplificado)
-                    creation_date = creation_date.replace('monday', 'lunes').replace('tuesday', 'martes').replace('wednesday', 'miércoles').replace('thursday', 'jueves').replace('friday', 'viernes').replace('saturday', 'sábado').replace('sunday', 'domingo').replace('january', 'enero').replace('february', 'febrero').replace('march', 'marzo').replace('april', 'abril').replace('may', 'mayo').replace('june', 'junio').replace('july', 'julio').replace('august', 'agosto').replace('september', 'septiembre').replace('october', 'octubre').replace('november', 'noviembre').replace('december', 'diciembre')
+                    creation_date = dt.strftime("%d/%m/%Y %H:%M")
                 except:
-                    creation_date = "Unknown"
+                    creation_date = "Desconocida"
 
             return {
                 "success": True,
@@ -393,22 +287,26 @@ async def verify_microsoft_account(email, password):
                 "has_minecraft": True,
                 "message": "✅ Cuenta verificada exitosamente",
                 "details": {
-                    "username": profile_data.get('name', 'N/A'),
-                    "uuid": profile_data.get('id', 'N/A'),
+                    "username": profile_data.get('name', 'No disponible'),
+                    "uuid": profile_data.get('id', 'No disponible'),
                     "account_type": account_type,
-                    "capes": ", ".join(capes) if capes else "None",
-                    "optifine_cape": profile_info['optifine_cape'],
+                    "capes": ", ".join(capes) if capes else "Ninguna",
                     "name_changeable": name_changeable,
                     "creation_date": creation_date,
-                    "games_owned": ", ".join(games_owned) if games_owned else "None",
-                    "access_token": minecraft_token
+                    "games_owned": ", ".join(games_owned) if games_owned else "Ninguno",
+                    "access_token": access_token
                 }
             }
 
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "error": "Tiempo de espera agotado. La verificación tomó demasiado tiempo."
+        }
     except Exception as e:
         return {
             "success": False,
-            "error": f"Error durante la verificación: {str(e)}"
+            "error": f"Error inesperado: {str(e)}"
         }
 
 # --- Funciones Auxiliares del Bot ---
@@ -441,138 +339,88 @@ def save_accounts():
     except Exception as e:
         print(f"❌ Error guardando cuentas: {e}")
 
-def update_log(account_info, status):
-    """Añade una entrada al archivo de registro."""
-    log_entry = (
-        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-        f"STATUS: {status} | Email: {account_info['gmail']}\n"
-    )
-    try:
-        with open(LOGS_FILE, 'a', encoding='utf-8') as f:
-            f.write(log_entry)
-    except Exception as e:
-        print(f"❌ Error escribiendo log: {e}")
-
-# --- Tasks y Eventos ---
-
-@bot.event
-async def on_ready():
-    """Evento que se ejecuta cuando el bot está listo."""
-    print(f'🤖 Bot conectado como {bot.user}!')
-    load_accounts()
-    
-    if not distribute_account.is_running():
-        distribute_account.start()
-    
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"{len(bot.accounts_data['available'])} cuentas"
-        )
-    )
-
-@tasks.loop(minutes=DISTRIBUTION_INTERVAL_MINUTES)
-async def distribute_account():
-    """Distribuye cuentas en el canal configurado."""
-    try:
-        channel = bot.get_channel(CHANNEL_ID)
-        if not channel or not bot.accounts_data['available']:
-            return
-
-        account = bot.accounts_data['available'].pop(0)
-
-        embed = discord.Embed(
-            title=f"✨ Cuenta Disponible ✨",
-            description="Reacciona para indicar el estado:",
-            color=0x00ff00
-        )
-        embed.add_field(name="📧 Correo", value=f"`{account['gmail']}`", inline=False)
-        embed.add_field(name="🔒 Contraseña", value=f"`{account['password']}`", inline=False)
-        
-        # Añadir información adicional si existe
-        if 'username' in account and account['username'] != 'N/A':
-            embed.add_field(name="🎮 Usuario", value=account['username'], inline=True)
-        if 'account_type' in account:
-            embed.add_field(name="📦 Tipo", value=account['account_type'], inline=True)
-        
-        embed.set_footer(text=f"✅ Usada | ❌ Error | 🚨 Bloqueada | {len(bot.accounts_data['available'])} restantes")
-
-        message = await channel.send(embed=embed)
-        await message.add_reaction("✅")
-        await message.add_reaction("❌")
-        await message.add_reaction("🚨")
-
-        account_distributed = account.copy()
-        account_distributed['message_id'] = message.id
-        account_distributed['distribution_date'] = datetime.now().isoformat()
-        account_distributed['reactions'] = {'✅': 0, '❌': 0, '🚨': 0, 'users': []}
-        bot.accounts_data['distributed'].append(account_distributed)
-        
-        save_accounts()
-        update_log(account, "DISTRIBUTED")
-        
-    except Exception as e:
-        print(f"❌ Error distribuyendo cuenta: {e}")
-
-# --- Comandos ---
+# --- Comandos Mejorados ---
 
 @bot.command(name='verifyaccount')
 @commands.has_permissions(administrator=True)
 async def verify_account(ctx, email: str, password: str):
-    """Verifica una cuenta de Microsoft y muestra información detallada."""
-    processing_msg = await ctx.send("🔄 Verificando cuenta Microsoft... Esto puede tomar unos segundos.")
+    """Verifica una cuenta de Microsoft con mejor manejo de errores."""
+    
+    # Mensaje de procesamiento
+    processing_msg = await ctx.send("🔍 **Verificando cuenta Microsoft...**\n⏳ Esto puede tomar 10-20 segundos")
     
     try:
+        # Ejecutar verificación
         result = await verify_microsoft_account(email, password)
+        
+        # Eliminar mensaje de procesamiento
+        await processing_msg.delete()
         
         if result["success"]:
             if result.get("has_minecraft", False):
                 details = result["details"]
                 
+                # Embed para cuenta CON Minecraft
                 embed = discord.Embed(
-                    title="✅ CUENTA VERIFICADA - MINECRAFT DETECTADO",
-                    color=0x00ff00
+                    title="🎮 **CUENTA VERIFICADA - MINECRAFT DETECTADO**",
+                    color=0x00ff00,
+                    timestamp=datetime.utcnow()
                 )
                 
-                # Información básica
                 embed.add_field(
-                    name="📧 Credenciales", 
-                    value=f"**Email:** `{email}`\n**Password:** `{password}`", 
+                    name="📧 **Credenciales**",
+                    value=f"```\nEmail: {email}\nContraseña: {password}\n```",
                     inline=False
                 )
                 
-                # Información de la cuenta
                 embed.add_field(
-                    name="👤 Información de Cuenta",
-                    value=f"**Usuario:** {details['username']}\n**UUID:** `{details['uuid']}`\n**Tipo:** {details['account_type']}",
+                    name="👤 **Información de Cuenta**",
+                    value=f"**Usuario:** `{details['username']}`\n**UUID:** `{details['uuid']}`\n**Tipo:** {details['account_type']}",
                     inline=False
                 )
                 
-                # Capas y personalización
-                cape_info = f"**Capas Minecraft:** {details['capes']}\n**Capa Optifine:** {details['optifine_cape']}\n**Puede cambiar nombre:** {details['name_changeable']}"
-                embed.add_field(name="🎨 Personalización", value=cape_info, inline=False)
+                embed.add_field(
+                    name="🎨 **Personalización**", 
+                    value=f"**Capas:** {details['capes']}\n**Cambio nombre:** {details['name_changeable']}",
+                    inline=True
+                )
                 
-                # Fecha y juegos
-                extra_info = f"**Fecha de creación:** {details['creation_date']}\n**Otros juegos:** {details['games_owned']}"
-                embed.add_field(name="📅 Información Adicional", value=extra_info, inline=False)
+                embed.add_field(
+                    name="📅 **Información Adicional**",
+                    value=f"**Creación:** {details['creation_date']}\n**Juegos:** {details['games_owned']}",
+                    inline=True
+                )
                 
                 embed.set_footer(text="Reacciona con ✅ para añadir al inventario o ❌ para cancelar")
                 
             else:
-                # Cuenta sin Minecraft
+                # Embed para cuenta SIN Minecraft
                 embed = discord.Embed(
-                    title="✅ CUENTA VERIFICADA - SIN MINECRAFT",
-                    color=0xffff00
+                    title="✅ **CUENTA VERIFICADA - SIN MINECRAFT**",
+                    color=0xffff00,
+                    timestamp=datetime.utcnow()
                 )
-                embed.add_field(name="📧 Email", value=email, inline=False)
-                embed.add_field(name="🔒 Contraseña", value=password, inline=False)
-                embed.add_field(name="💡 Estado", value="Cuenta Microsoft válida pero sin Minecraft", inline=False)
+                
+                embed.add_field(
+                    name="📧 **Credenciales**",
+                    value=f"```\nEmail: {email}\nContraseña: {password}\n```",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="💡 **Estado**",
+                    value="Cuenta Microsoft válida pero no tiene Minecraft asociado",
+                    inline=False
+                )
+                
                 embed.set_footer(text="Reacciona con ✅ para añadir al inventario o ❌ para cancelar")
             
+            # Enviar embed y añadir reacciones
             message = await ctx.send(embed=embed)
             await message.add_reaction("✅")
             await message.add_reaction("❌")
             
+            # Guardar datos temporalmente
             bot.temp_verified_accounts[message.id] = {
                 "email": email,
                 "password": password,
@@ -580,41 +428,60 @@ async def verify_account(ctx, email: str, password: str):
             }
             
         else:
+            # Embed de ERROR
             embed = discord.Embed(
-                title="❌ ERROR EN VERIFICACIÓN",
-                color=0xff0000
+                title="❌ **ERROR EN VERIFICACIÓN**",
+                color=0xff0000,
+                timestamp=datetime.utcnow()
             )
-            embed.add_field(name="📧 Email", value=email, inline=False)
-            embed.add_field(name="🔒 Contraseña", value=password, inline=False)
-            embed.add_field(name="❌ Error", value=result["error"], inline=False)
+            
+            embed.add_field(
+                name="📧 **Credenciales**",
+                value=f"```\nEmail: {email}\nContraseña: {password}\n```",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="🚨 **Error Detectado**",
+                value=f"**{result['error']}**",
+                inline=False
+            )
+            
+            embed.set_footer(text="Verifica las credenciales e intenta nuevamente")
+            
             await ctx.send(embed=embed)
-    
+            
     except Exception as e:
+        await processing_msg.delete()
+        
         embed = discord.Embed(
-            title="❌ ERROR INESPERADO",
-            description=f"Ocurrió un error: {str(e)}",
+            title="💥 **ERROR CRÍTICO**",
+            description=f"Ocurrió un error inesperado: ```{str(e)}```",
             color=0xff0000
         )
         await ctx.send(embed=embed)
-    
-    finally:
-        await processing_msg.delete()
 
 @bot.command(name='addaccount')
 @commands.has_permissions(administrator=True)
 async def add_account(ctx, email: str, password: str):
-    """Añade una cuenta al inventario."""
+    """Añade una cuenta manualmente al inventario."""
     email_lower = email.lower()
 
     if email_lower in bot.registered_emails:
-        await ctx.send("❌ Esta cuenta ya existe en el inventario.")
+        embed = discord.Embed(
+            title="❌ **Cuenta Duplicada**",
+            description=f"La cuenta `{email}` ya existe en el inventario.",
+            color=0xff0000
+        )
+        await ctx.send(embed=embed)
         return
 
     new_account = {
         'username': email,
         'gmail': email, 
         'password': password,
-        'added_date': datetime.now().isoformat()
+        'added_date': datetime.now().isoformat(),
+        'added_by': str(ctx.author)
     }
     
     bot.accounts_data['available'].append(new_account)
@@ -622,22 +489,30 @@ async def add_account(ctx, email: str, password: str):
     save_accounts()
 
     embed = discord.Embed(
-        title="✅ Cuenta Añadida",
+        title="✅ **Cuenta Añadida**",
+        description=f"La cuenta ha sido añadida al inventario.",
         color=0x00ff00
     )
-    embed.add_field(name="📧 Correo", value=email)
-    embed.add_field(name="📊 Inventario", value=f"{len(bot.accounts_data['available'])} disponibles")
+    embed.add_field(name="📧 Email", value=email, inline=True)
+    embed.add_field(name="🔒 Contraseña", value=password, inline=True)
+    embed.add_field(name="📊 Total", value=f"{len(bot.accounts_data['available'])} disponibles", inline=True)
+    
     await ctx.send(embed=embed)
 
-@bot.command(name='stats')
-async def stats(ctx):
-    """Muestra estadísticas del inventario."""
-    embed = discord.Embed(title="📊 Estadísticas", color=0x0099ff)
-    embed.add_field(name="📥 Disponibles", value=len(bot.accounts_data['available']), inline=True)
-    embed.add_field(name="📤 Distribuidas", value=len(bot.accounts_data['distributed']), inline=True)
+@bot.command(name='test')
+async def test_command(ctx):
+    """Comando de prueba para verificar que el bot funciona."""
+    embed = discord.Embed(
+        title="🤖 **Bot Funcionando**",
+        description="El bot está en línea y respondiendo correctamente.",
+        color=0x0099ff
+    )
+    embed.add_field(name="📊 Cuentas Disponibles", value=len(bot.accounts_data['available']), inline=True)
+    embed.add_field(name="🕒 Tiempo Activo", value="En línea", inline=True)
+    
     await ctx.send(embed=embed)
 
-# Manejo de reacciones para verificación
+# Manejo de reacciones
 @bot.event
 async def on_reaction_add(reaction, user):
     if user.bot:
@@ -655,10 +530,11 @@ async def on_reaction_add(reaction, user):
                     'gmail': account_data["email"], 
                     'password': account_data["password"],
                     'verified': True,
-                    'added_date': datetime.now().isoformat()
+                    'added_date': datetime.now().isoformat(),
+                    'added_by': str(user)
                 }
                 
-                # Añadir detalles si la cuenta tiene Minecraft
+                # Añadir detalles si tiene Minecraft
                 if account_data.get("has_minecraft") and "details" in account_data:
                     new_account.update(account_data["details"])
                 
@@ -666,15 +542,16 @@ async def on_reaction_add(reaction, user):
                 bot.registered_emails.add(email_lower)
                 save_accounts()
                 
-                await reaction.message.reply("✅ Cuenta añadida al inventario!")
-                
-                # Actualizar presencia
-                await bot.change_presence(
-                    activity=discord.Activity(
-                        type=discord.ActivityType.watching,
-                        name=f"{len(bot.accounts_data['available'])} cuentas"
-                    )
+                embed = discord.Embed(
+                    title="✅ **Cuenta Añadida**",
+                    description=f"La cuenta ha sido añadida al inventario.",
+                    color=0x00ff00
                 )
+                embed.add_field(name="📧 Email", value=account_data["email"], inline=True)
+                embed.add_field(name="📊 Total", value=f"{len(bot.accounts_data['available'])} disponibles", inline=True)
+                
+                await reaction.message.reply(embed=embed)
+                
             else:
                 await reaction.message.reply("❌ Esta cuenta ya existe en el inventario.")
             
@@ -685,6 +562,41 @@ async def on_reaction_add(reaction, user):
             await reaction.message.reply("❌ Cuenta descartada.")
             del bot.temp_verified_accounts[reaction.message.id]
             await reaction.message.clear_reactions()
+
+# --- Eventos del Bot ---
+@bot.event
+async def on_ready():
+    print(f'🤖 Bot conectado como {bot.user}')
+    load_accounts()
+    
+    if not distribute_account.is_running():
+        distribute_account.start()
+
+@tasks.loop(minutes=DISTRIBUTION_INTERVAL_MINUTES)
+async def distribute_account():
+    """Distribuye cuentas automáticamente."""
+    try:
+        channel = bot.get_channel(CHANNEL_ID)
+        if channel and bot.accounts_data['available']:
+            account = bot.accounts_data['available'].pop(0)
+            
+            embed = discord.Embed(
+                title="🎁 **Cuenta Disponible**",
+                color=0x0099ff
+            )
+            embed.add_field(name="📧 Email", value=f"`{account['gmail']}`", inline=False)
+            embed.add_field(name="🔒 Contraseña", value=f"`{account['password']}`", inline=False)
+            embed.set_footer(text="Reacciona: ✅ Usada | ❌ Error | 🚨 Bloqueada")
+            
+            message = await channel.send(embed=embed)
+            await message.add_reaction("✅")
+            await message.add_reaction("❌")
+            await message.add_reaction("🚨")
+            
+            save_accounts()
+            
+    except Exception as e:
+        print(f"Error en distribución: {e}")
 
 # --- Keep Alive ---
 app = Flask(__name__)
@@ -706,4 +618,4 @@ if __name__ == '__main__':
     try:
         bot.run(TOKEN)
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error iniciando bot: {e}")
