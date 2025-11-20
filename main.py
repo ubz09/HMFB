@@ -15,7 +15,7 @@ load_dotenv()
 # --- Configuración Inicial ---
 TOKEN = os.environ.get('DISCORD_TOKEN')
 CHANNEL_ID = int(os.environ.get('CHANNEL_ID', 0))
-DISTRIBUTION_INTERVAL_MINUTES = 30.0
+DISTRIBUTION_INTERVAL_MINUTES = 10.0
 
 # Validar variables de entorno requeridas
 if not TOKEN:
