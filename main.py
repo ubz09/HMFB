@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks # tasks importado para el bucle
 from discord import app_commands
 from dotenv import load_dotenv
 import os
@@ -87,12 +87,87 @@ async def verify_minecraft_skin(ign: str) -> tuple[bool, str, str]:
         return False, "", f"Error: {str(e)}"
 
 
+# --- Lógica de Tarea Periódica de Envío de Cuentas ---
+
+@tasks.loop(minutes=5)
+async def accounts_task():
+    await send_accounts_periodically()
+
+async def send_accounts_periodically():
+    """Obtiene las cuentas 'ADDED', las envía al canal configurado y actualiza su estado a 'DISTRIBUTED'."""
+    if CHANNEL_ID is None or CHANNEL_ID == 0:
+        logger.warning("CHANNEL_ID no está configurado. Omitiendo el envío periódico de cuentas.")
+        return
+
+    try:
+        channel = bot.get_channel(CHANNEL_ID)
+        if not channel:
+            logger.error(f"No se pudo encontrar el canal con ID: {CHANNEL_ID}")
+            return
+
+        # 1. Obtener todas las cuentas y filtrar las 'ADDED'
+        accounts = DatabaseManager.get_all_accounts()
+        added_accounts = [acc for acc in accounts if acc.get('status', 'ADDED') == 'ADDED']
+
+        if not added_accounts:
+            logger.info("No hay cuentas con estado 'ADDED' para enviar.")
+            return
+
+        # Limitar a 5 cuentas por envío
+        accounts_to_send = added_accounts[:5]
+        
+        # 2. Construir el embed para el envío
+        embed = discord.Embed(
+            title="✨ Nuevas Cuentas Premium Minecraft ✨",
+            color=0x42f590,
+            description=f"Se han liberado **{len(accounts_to_send)}** cuentas premium. ¡Sé el primero en reclamarlas!"
+        )
+        
+        account_list = ""
+        
+        for account in accounts_to_send:
+            # Asumiendo que DatabaseManager.get_account o similar devuelve estos campos
+            account_list += (
+                f"**ID**: `{account['id']}`\n"
+                f"**IGN**: `{account['ign']}`\n"
+                f"**Email**: `{account['email']}`\n"
+                f"**Contraseña**: `{account['password']}`\n"
+                "━━━━━━━━━━━━━━\n"
+            )
+        
+        embed.add_field(name="📋 Detalles de Cuentas", value=account_list, inline=False)
+        embed.set_footer(text="¡El estado de estas cuentas ha sido actualizado a DISTRIBUTED!")
+
+        # 3. Enviar el embed al canal
+        if accounts_to_send:
+            await channel.send(embed=embed)
+            logger.info(f"Se enviaron {len(accounts_to_send)} cuentas al canal {CHANNEL_ID}.")
+
+            # 4. Actualizar el estado de las cuentas enviadas
+            for account in accounts_to_send:
+                # Se asume que este método existe en DatabaseManager (database.py)
+                success, message = DatabaseManager.update_status(account['id'], 'DISTRIBUTED') 
+                if success:
+                    logger.info(f"Estado de cuenta ID {account['id']} actualizado a DISTRIBUTED.")
+                else:
+                    logger.error(f"Fallo al actualizar estado de cuenta ID {account['id']}: {message}")
+                
+    except Exception as e:
+        logger.error(f"Error al enviar cuentas periódicamente: {e}", exc_info=True)
+
+
+# --- Eventos y Comandos del Bot ---
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
+        
+        # Iniciar la tarea periódica de cuentas
+        accounts_task.start()
+        
     except Exception as e:
         print(f"Error syncing commands: {e}")
 
@@ -153,7 +228,8 @@ async def help_command(interaction: discord.Interaction):
               "✅ Gestión de estado de un clic (Activo/Duplicado/Bloqueado)\n"
               "✅ Base de datos JSON local con registro automático\n"
               "✅ Detección de cuenta premium\n"
-              "✅ Protección de limitación de velocidad",
+              "✅ Protección de limitación de velocidad\n"
+              "✅ **Envío periódico automático de cuentas (cada 5 minutos)**", # Característica nueva
         inline=False
     )
     
@@ -409,14 +485,13 @@ async def get_account(interaction: discord.Interaction, account_id: str):
                 
                 async def _update_status(self, interaction: discord.Interaction, new_status: str):
                     try:
-                        database = DatabaseManager._load_database()
-                        for acc in database["accounts"]:
-                            if acc["id"] == self.account_id:
-                                acc['status'] = new_status
-                                break
-                        DatabaseManager._save_database(database)
+                        # Usar el método update_status (asumiendo que existe)
+                        success, message = DatabaseManager.update_status(self.account_id, new_status)
+                        
+                        if not success:
+                            raise Exception(message)
+                        
                         updated_account = DatabaseManager.get_account(self.account_id)
-                        DatabaseManager._log_action(new_status, {"ign": updated_account['ign'], "email": updated_account['email'], "password": updated_account['password']})
                         
                         # Update the current embed with new account info
                         self.current_embed = create_account_embed(updated_account)
@@ -648,15 +723,13 @@ class StatusChangeButtons(discord.ui.View):
                 await interaction.response.send_message("Account not found.", ephemeral=True)
                 return
             
-            # Update in database
-            database = DatabaseManager._load_database()
-            for acc in database["accounts"]:
-                if acc["id"] == self.account_id:
-                    acc['status'] = new_status
-                    break
-            DatabaseManager._save_database(database)
-            DatabaseManager._log_action(new_status, {"ign": account['ign'], "email": account['email'], "password": account['password']})
+            # Update in database using update_status (asumiendo que existe)
+            success, message = DatabaseManager.update_status(self.account_id, new_status)
             
+            if not success:
+                await interaction.response.send_message(f"Error updating status: {message}", ephemeral=True)
+                return
+
             # Update embed
             updated_account = DatabaseManager.get_account(self.account_id)
             embed = create_account_embed(updated_account, color=0x00FF00)
