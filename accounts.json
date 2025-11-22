@@ -1,0 +1,36 @@
+{
+    "accounts": [
+        {
+            "id": "1",
+            "email": "testing@haz.ls",
+            "password": "xdxdx123",
+            "ign": "Steve",
+            "status": "ADDED",
+            "added_at": "2025-11-20T22:10:20"
+        },
+        {
+            "id": "2",
+            "email": "asdasd@asdg",
+            "password": "asdadsxd",
+            "ign": "lmiq",
+            "status": "ADDED",
+            "added_at": "2025-11-20T22:21:42"
+        },
+        {
+            "id": "3",
+            "email": "holyshit@hotmail.com",
+            "password": "monkley",
+            "ign": "ubz",
+            "status": "ACTIVE",
+            "added_at": "2025-11-20T22:27:39"
+        },
+        {
+            "id": "4",
+            "email": "ola@hola.cl",
+            "password": "nosé",
+            "ign": "Ayshaaaaaa",
+            "status": "ACTIVE",
+            "added_at": "2025-11-20T22:52:24"
+        }
+    ]
+}
