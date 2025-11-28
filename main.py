@@ -205,7 +205,55 @@ async def clean_keys_task():
     """Limpia keys expiradas cada hora."""
     clean_expired_keys()
 
-# *** CORREGIDO: Clase Modal para /get-key ***
+# *** NUEVO: View para borrar tickets ***
+class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label='🗑️ Borrar Ticket', style=discord.ButtonStyle.danger, custom_id='delete_ticket')
+    async def delete_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Verificar que sea un administrador o el usuario del ticket
+        user_has_permission = (
+            interaction.user.guild_permissions.administrator or 
+            interaction.user.name in interaction.channel.name
+        )
+        
+        if not user_has_permission:
+            await interaction.response.send_message(
+                '❌ Solo los administradores o el dueño del ticket pueden borrarlo.',
+                ephemeral=True
+            )
+            return
+        
+        # Confirmar eliminación
+        confirm_embed = discord.Embed(
+            title='⚠️ Confirmar Eliminación',
+            description='¿Estás seguro de que quieres eliminar este ticket? Esta acción no se puede deshacer.',
+            color=discord.Color.orange()
+        )
+        
+        confirm_view = discord.ui.View(timeout=30)
+        
+        @discord.ui.button(label='✅ Sí, Eliminar', style=discord.ButtonStyle.danger)
+        async def confirm_delete(interaction: discord.Interaction, button: discord.ui.Button):
+            try:
+                channel_name = interaction.channel.name
+                await interaction.response.send_message('🗑️ Eliminando ticket...', ephemeral=True)
+                await interaction.channel.delete(reason=f'Ticket eliminado por {interaction.user.name}')
+                print(f"🗑️ Ticket eliminado: {channel_name} por {interaction.user.name}")
+            except Exception as e:
+                await interaction.response.send_message(f'❌ Error al eliminar el ticket: {e}', ephemeral=True)
+        
+        @discord.ui.button(label='❌ Cancelar', style=discord.ButtonStyle.secondary)
+        async def cancel_delete(interaction: discord.Interaction, button: discord.ui.Button):
+            await interaction.response.send_message('✅ Eliminación cancelada.', ephemeral=True)
+        
+        confirm_view.add_item(confirm_delete)
+        confirm_view.add_item(cancel_delete)
+        
+        await interaction.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
+
+# *** Clase Modal para /get-key ***
 class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
     def __init__(self, bot_instance):
         super().__init__(timeout=300)
@@ -227,7 +275,6 @@ class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # VERIFICAR que el canal de solicitudes esté configurado
         if not REQUESTS_CHANNEL_ID:
             await interaction.response.send_message(
                 '❌ El sistema de solicitudes no está configurado correctamente.',
@@ -235,7 +282,6 @@ class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
             )
             return
 
-        # OBTENER el canal de solicitudes (1444096607095099473)
         requests_channel = self.bot.get_channel(REQUESTS_CHANNEL_ID)
         if not requests_channel:
             await interaction.response.send_message(
@@ -244,7 +290,6 @@ class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
             )
             return
 
-        # ENVIAR la solicitud al canal de administradores (1444096607095099473)
         try:
             embed = discord.Embed(
                 title='🔑 Nueva Solicitud de Key - PENDIENTE',
@@ -261,10 +306,8 @@ class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
             
             view = KeyRequestView(interaction.user.id, self.name.value, self.reason.value)
             
-            # ⚠️ ESTA ES LA LÍNEA IMPORTANTE: Enviar al canal de solicitudes
             await requests_channel.send(embed=embed, view=view)
             
-            # Confirmar al usuario en el canal actual
             await interaction.response.send_message(
                 '✅ Tu solicitud ha sido enviada correctamente a los administradores. '
                 'Te notificaremos cuando sea revisada.',
@@ -301,7 +344,6 @@ class KeyRequestView(discord.ui.View):
     
     @discord.ui.button(label='Aceptar', style=discord.ButtonStyle.success, custom_id='accept_key')
     async def accept_key(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Verificar permisos de administrador
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message('❌ Solo los administradores pueden usar este botón.', ephemeral=True)
             return
@@ -327,27 +369,31 @@ class KeyRequestView(discord.ui.View):
                     reason=f'Ticket para key request de {user.display_name}'
                 )
                 
-                # Enviar mensaje en el ticket
+                # Enviar mensaje en el ticket CON BOTÓN DE BORRAR
                 embed = discord.Embed(
                     title='🎫 Ticket de Key Aceptado',
                     description=f'Hola {user.mention}, tu solicitud de key ha sido **aceptada**.',
                     color=discord.Color.green()
                 )
-                embed.add_field(name='Nombre', value=self.user_name, inline=False)
-                embed.add_field(name='Razón', value=self.user_reason, inline=False)
-                embed.add_field(name='Aceptado por', value=interaction.user.mention, inline=False)
-                embed.add_field(name='Próximos pasos', value='Un administrador te proporcionará una key pronto.', inline=False)
+                embed.add_field(name='👤 Nombre', value=self.user_name, inline=False)
+                embed.add_field(name='📝 Razón', value=self.user_reason, inline=False)
+                embed.add_field(name='✅ Aceptado por', value=interaction.user.mention, inline=False)
+                embed.add_field(name='🔑 Próximos pasos', value='Un administrador te proporcionará una key pronto.', inline=False)
+                embed.add_field(name='🗑️ Gestión', value='Usa el botón de abajo para eliminar este ticket cuando hayas terminado.', inline=False)
                 
-                await channel.send(embed=embed)
+                # *** NUEVO: Añadir view con botón de borrar ticket ***
+                ticket_view = TicketView()
+                await channel.send(embed=embed, view=ticket_view)
+                
                 await interaction.response.send_message(f'✅ Ticket creado: {channel.mention}', ephemeral=True)
                 
                 # Actualizar el embed original en el canal de solicitudes
                 embed_original = interaction.message.embeds[0]
                 embed_original.title = '🔑 Solicitud de Key - ACEPTADA ✅'
                 embed_original.color = discord.Color.green()
-                embed_original.add_field(name='Estado', value='✅ ACEPTADA', inline=False)
-                embed_original.add_field(name='Aceptado por', value=interaction.user.mention, inline=False)
-                embed_original.add_field(name='Ticket', value=channel.mention, inline=False)
+                embed_original.add_field(name='📊 Estado', value='✅ ACEPTADA', inline=False)
+                embed_original.add_field(name='👤 Aceptado por', value=interaction.user.mention, inline=False)
+                embed_original.add_field(name='🎫 Ticket', value=channel.mention, inline=False)
                 
                 # Deshabilitar botones
                 for item in self.children:
@@ -361,7 +407,6 @@ class KeyRequestView(discord.ui.View):
     
     @discord.ui.button(label='Rechazar', style=discord.ButtonStyle.danger, custom_id='reject_key')
     async def reject_key(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Verificar permisos de administrador
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message('❌ Solo los administradores pueden usar este botón.', ephemeral=True)
             return
@@ -369,16 +414,15 @@ class KeyRequestView(discord.ui.View):
         user = interaction.guild.get_member(self.user_id)
         if user:
             try:
-                # Notificar al usuario via DM
                 embed = discord.Embed(
                     title='❌ Solicitud de Key Rechazada',
                     description='Tu solicitud de key ha sido rechazada por un administrador.',
                     color=discord.Color.red()
                 )
-                embed.add_field(name='Nombre', value=self.user_name, inline=False)
-                embed.add_field(name='Razón de tu solicitud', value=self.user_reason, inline=False)
-                embed.add_field(name='Rechazado por', value=interaction.user.mention, inline=False)
-                embed.add_field(name='Motivo', value='Puedes contactar a un administrador para más información.', inline=False)
+                embed.add_field(name='👤 Nombre', value=self.user_name, inline=False)
+                embed.add_field(name='📝 Razón de tu solicitud', value=self.user_reason, inline=False)
+                embed.add_field(name='👤 Rechazado por', value=interaction.user.mention, inline=False)
+                embed.add_field(name='ℹ️ Motivo', value='Puedes contactar a un administrador para más información.', inline=False)
                 
                 await user.send(embed=embed)
                 await interaction.response.send_message('✅ Usuario notificado del rechazo', ephemeral=True)
@@ -386,14 +430,12 @@ class KeyRequestView(discord.ui.View):
             except:
                 await interaction.response.send_message('✅ Solicitud rechazada (no se pudo notificar al usuario via DM)', ephemeral=True)
         
-        # Actualizar el embed original en el canal de solicitudes
         embed_original = interaction.message.embeds[0]
         embed_original.title = '🔑 Solicitud de Key - RECHAZADA ❌'
         embed_original.color = discord.Color.red()
-        embed_original.add_field(name='Estado', value='❌ RECHAZADA', inline=False)
-        embed_original.add_field(name='Rechazado por', value=interaction.user.mention, inline=False)
+        embed_original.add_field(name='📊 Estado', value='❌ RECHAZADA', inline=False)
+        embed_original.add_field(name='👤 Rechazado por', value=interaction.user.mention, inline=False)
         
-        # Deshabilitar botones
         for item in self.children:
             item.disabled = True
         await interaction.message.edit(embed=embed_original, view=self)
@@ -408,14 +450,15 @@ async def on_ready():
     print(f'📨 Canal de solicitudes (Admins): {REQUESTS_CHANNEL_ID}')
     load_accounts()
     load_keys()
-    distribute_account.start()
-    clean_keys_task.start()
     
     try:
         synced = await bot.tree.sync()
         print(f"✅ Sincronizados {len(synced)} comandos de barra")
     except Exception as e:
         print(f"❌ Error sincronizando comandos: {e}")
+    
+    distribute_account.start()
+    clean_keys_task.start()
 
 @tasks.loop(minutes=DISTRIBUTION_INTERVAL_MINUTES)
 async def distribute_account():
@@ -491,7 +534,6 @@ async def on_reaction_add(reaction, user):
 @bot.tree.command(name="get-key", description="Solicitar una key de acceso a las cuentas")
 async def get_key(interaction: discord.Interaction):
     """Comando para solicitar una key de acceso"""
-    # Verificar que el canal de solicitudes esté configurado
     if not REQUESTS_CHANNEL_ID:
         await interaction.response.send_message(
             '❌ El sistema de solicitudes no está configurado. Contacta a un administrador.',
@@ -499,7 +541,6 @@ async def get_key(interaction: discord.Interaction):
         )
         return
     
-    # Crear y mostrar el modal - PASAR LA INSTANCIA DEL BOT
     modal = KeyRequestModal(bot)
     await interaction.response.send_modal(modal)
 
