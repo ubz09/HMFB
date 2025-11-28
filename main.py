@@ -1,32 +1,44 @@
 # -*- coding: utf-8 -*-
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands
 import json
 import os
 from datetime import datetime
 from threading import Thread
 from flask import Flask
+import random
+import string
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
 DISTRIBUTION_INTERVAL_MINUTES = 10.0
+# *** NUEVO: Canal para solicitudes de keys ***
+REQUEST_CHANNEL_ID = int(os.environ.get('REQUEST_CHANNEL_ID', CHANNEL_ID))
 
 # --- Rutas de Archivos ---
 DATA_DIR = 'data'
 ACCOUNTS_FILE = os.path.join(DATA_DIR, 'accounts.json')
 LOGS_FILE = os.path.join(DATA_DIR, 'logs.txt')
+# *** NUEVO: Archivo para almacenar keys y usuarios con acceso ***
+KEYS_FILE = os.path.join(DATA_DIR, 'keys.json')
 
 # Asegurarse de que las carpetas y archivos existan
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-for file_path in [ACCOUNTS_FILE, LOGS_FILE]:
+for file_path in [ACCOUNTS_FILE, LOGS_FILE, KEYS_FILE]:
     if not os.path.exists(file_path):
         if file_path.endswith('.json'):
             # Inicializar el archivo JSON con las estructuras necesarias
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump({'available': [], 'distributed': []}, f, indent=4)
+            if file_path == KEYS_FILE:
+                # Estructura para keys: {key: {used: bool, user_id: int, created_by: int}, users_with_access: [user_ids]}
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump({'keys': {}, 'users_with_access': []}, f, indent=4)
+            else:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump({'available': [], 'distributed': []}, f, indent=4)
         else:
             # Inicializar el archivo de logs
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -36,12 +48,15 @@ for file_path in [ACCOUNTS_FILE, LOGS_FILE]:
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
+intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Cargar los datos de las cuentas al iniciar
 accounts_data = {'available': [], 'distributed': []}
 # *** NUEVO: Conjunto para una búsqueda rápida de emails ya registrados ***
 registered_emails = set()
+# *** NUEVO: Datos de keys y acceso ***
+keys_data = {'keys': {}, 'users_with_access': []}
 
 # --- Funciones Auxiliares ---
 
@@ -77,6 +92,24 @@ def save_accounts():
     except Exception as e:
         print(f"Error guardando cuentas: {e}")
 
+def load_keys():
+    """Carga los datos de keys y acceso."""
+    global keys_data
+    try:
+        with open(KEYS_FILE, 'r', encoding='utf-8') as f:
+            keys_data = json.load(f)
+            return True
+    except:
+        return False
+
+def save_keys():
+    """Guarda los datos de keys y acceso."""
+    try:
+        with open(KEYS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(keys_data, f, indent=4)
+    except Exception as e:
+        print(f"Error guardando keys: {e}")
+
 def update_log(account_info, status):
     """Añade una entrada al archivo de registro (log)."""
     # Usamos el 'gmail' (ahora cualquier email) como identificador principal en el log
@@ -99,15 +132,146 @@ def remove_import_file(file_path):
     except Exception as e:
         print(f"Error al eliminar archivo {file_path}: {e}")
 
-# --- Tasks y Eventos (Sin cambios relevantes aquí) ---
+# *** NUEVO: Función para generar keys ***
+def generate_key():
+    """Genera una key en formato HMFB-XXXX-XXXX-XXXX"""
+    parts = []
+    # Primera parte fija "HMFB"
+    parts.append("HMFB")
+    # Tres partes de 4 caracteres aleatorios (números)
+    for _ in range(3):
+        part = ''.join(random.choices(string.digits, k=4))
+        parts.append(part)
+    return '-'.join(parts)
+
+# *** NUEVO: Función para verificar si usuario tiene acceso ***
+def has_access(user_id):
+    """Verifica si un usuario tiene acceso al comando /cuenta"""
+    return user_id in keys_data['users_with_access']
+
+# *** NUEVO: Clase Modal para /get-key ***
+class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key'):
+    def __init__(self):
+        super().__init__()
+    
+    name = discord.ui.TextInput(
+        label='Nombre',
+        placeholder='Ingresa tu nombre completo',
+        required=True,
+        max_length=100
+    )
+    
+    reason = discord.ui.TextInput(
+        label='Razón de la solicitud',
+        placeholder='Explica por qué necesitas acceso',
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500
+    )
+
+# *** NUEVO: View para los botones de aceptar/rechazar ***
+class KeyRequestView(discord.ui.View):
+    def __init__(self, user_id, user_name, user_reason):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.user_name = user_name
+        self.user_reason = user_reason
+    
+    @discord.ui.button(label='Aceptar', style=discord.ButtonStyle.success, custom_id='accept_key')
+    async def accept_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Crear ticket con el usuario
+        user = interaction.guild.get_member(self.user_id)
+        if user:
+            try:
+                # Crear canal privado
+                overwrites = {
+                    interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                    user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                    interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                }
+                
+                channel = await interaction.guild.create_text_channel(
+                    f'ticket-{user.display_name}',
+                    overwrites=overwrites
+                )
+                
+                # Enviar mensaje en el ticket
+                embed = discord.Embed(
+                    title='🎫 Ticket de Key Aceptado',
+                    description=f'Hola {user.mention}, tu solicitud de key ha sido **aceptada**.',
+                    color=discord.Color.green()
+                )
+                embed.add_field(name='Nombre', value=self.user_name, inline=False)
+                embed.add_field(name='Razón', value=self.user_reason, inline=False)
+                embed.add_field(name='Próximos pasos', value='Un administrador te proporcionará una key pronto.', inline=False)
+                
+                await channel.send(embed=embed)
+                await interaction.response.send_message(f'✅ Ticket creado: {channel.mention}', ephemeral=True)
+                
+                # Actualizar el embed original
+                embed_original = interaction.message.embeds[0]
+                embed_original.color = discord.Color.green()
+                embed_original.add_field(name='Estado', value='✅ ACEPTADO', inline=False)
+                embed_original.add_field(name='Aceptado por', value=interaction.user.mention, inline=False)
+                embed_original.add_field(name='Ticket', value=channel.mention, inline=False)
+                
+                self.accept_key.disabled = True
+                self.reject_key.disabled = True
+                await interaction.message.edit(embed=embed_original, view=self)
+                
+            except Exception as e:
+                await interaction.response.send_message(f'❌ Error al crear ticket: {e}', ephemeral=True)
+        else:
+            await interaction.response.send_message('❌ Usuario no encontrado en el servidor', ephemeral=True)
+    
+    @discord.ui.button(label='Rechazar', style=discord.ButtonStyle.danger, custom_id='reject_key')
+    async def reject_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.guild.get_member(self.user_id)
+        if user:
+            try:
+                # Notificar al usuario via DM
+                embed = discord.Embed(
+                    title='❌ Solicitud de Key Rechazada',
+                    description='Tu solicitud de key ha sido rechazada por un administrador.',
+                    color=discord.Color.red()
+                )
+                embed.add_field(name='Nombre', value=self.user_name, inline=False)
+                embed.add_field(name='Razón', value=self.user_reason, inline=False)
+                embed.add_field(name='Rechazado por', value=interaction.user.mention, inline=False)
+                
+                await user.send(embed=embed)
+                await interaction.response.send_message('✅ Usuario notificado del rechazo', ephemeral=True)
+                
+            except:
+                await interaction.response.send_message('✅ Solicitud rechazada (no se pudo notificar al usuario via DM)', ephemeral=True)
+        
+        # Actualizar el embed original
+        embed_original = interaction.message.embeds[0]
+        embed_original.color = discord.Color.red()
+        embed_original.add_field(name='Estado', value='❌ RECHAZADO', inline=False)
+        embed_original.add_field(name='Rechazado por', value=interaction.user.mention, inline=False)
+        
+        self.accept_key.disabled = True
+        self.reject_key.disabled = True
+        await interaction.message.edit(embed=embed_original, view=self)
+
+# --- Tasks y Eventos ---
 
 @bot.event
 async def on_ready():
     """Evento que se ejecuta cuando el bot está listo."""
     print(f'🤖 Bot conectado como {bot.user}!')
     load_accounts()
+    load_keys()
     # Iniciar el bucle de distribución
     distribute_account.start()
+    
+    # Sincronizar comandos de barra
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Sincronizados {len(synced)} comandos de barra")
+    except Exception as e:
+        print(f"❌ Error sincronizando comandos: {e}")
 
 @tasks.loop(minutes=DISTRIBUTION_INTERVAL_MINUTES)
 async def distribute_account():
@@ -191,7 +355,142 @@ async def on_reaction_add(reaction, user):
             save_accounts()
             return
 
-# --- Comandos ---
+# --- Comandos de Barra (NUEVOS) ---
+
+@bot.tree.command(name="get-key", description="Solicitar una key de acceso")
+async def get_key(interaction: discord.Interaction):
+    """Comando para solicitar una key de acceso"""
+    modal = KeyRequestModal()
+    await interaction.response.send_modal(modal)
+    
+    # Esperar a que se complete el modal
+    await modal.wait()
+    
+    # Enviar la solicitud al canal de administradores
+    channel = bot.get_channel(REQUEST_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(
+            title='🔑 Solicitud de Key',
+            description=f'Solicitud de key de {interaction.user.mention}',
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(name='👤 Nombre', value=modal.name.value, inline=False)
+        embed.add_field(name='📝 Razón', value=modal.reason.value, inline=False)
+        embed.add_field(name='🆔 User ID', value=interaction.user.id, inline=False)
+        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        
+        view = KeyRequestView(interaction.user.id, modal.name.value, modal.reason.value)
+        await channel.send(embed=embed, view=view)
+        
+        await interaction.followup.send('✅ Tu solicitud ha sido enviada a los administradores.', ephemeral=True)
+    else:
+        await interaction.followup.send('❌ Error: Canal de solicitudes no configurado.', ephemeral=True)
+
+@bot.tree.command(name="key", description="Generar una nueva key de acceso (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def generate_key_command(interaction: discord.Interaction):
+    """Genera una nueva key de acceso"""
+    new_key = generate_key()
+    keys_data['keys'][new_key] = {
+        'used': False,
+        'user_id': None,
+        'created_by': interaction.user.id,
+        'created_at': datetime.now().isoformat()
+    }
+    save_keys()
+    
+    embed = discord.Embed(
+        title='🔑 Nueva Key Generada',
+        description=f'Key: `{new_key}`',
+        color=discord.Color.green()
+    )
+    embed.add_field(name='Creada por', value=interaction.user.mention)
+    embed.add_field(name='Estado', value='🟢 DISPONIBLE')
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="access", description="Validar tu key de acceso")
+async def access_command(interaction: discord.Interaction, key: str):
+    """Validar una key de acceso"""
+    key_upper = key.upper()
+    
+    if key_upper in keys_data['keys']:
+        key_info = keys_data['keys'][key_upper]
+        
+        if key_info['used']:
+            await interaction.response.send_message('❌ Esta key ya ha sido utilizada.', ephemeral=True)
+        else:
+            # Marcar key como usada y dar acceso al usuario
+            key_info['used'] = True
+            key_info['user_id'] = interaction.user.id
+            key_info['used_at'] = datetime.now().isoformat()
+            
+            if interaction.user.id not in keys_data['users_with_access']:
+                keys_data['users_with_access'].append(interaction.user.id)
+            
+            save_keys()
+            
+            embed = discord.Embed(
+                title='✅ Acceso Concedido',
+                description='Ahora tienes acceso al comando `/cuenta`',
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message('❌ Key inválida.', ephemeral=True)
+
+@bot.tree.command(name="cuenta", description="Obtener una cuenta (Requiere key)")
+async def cuenta_command(interaction: discord.Interaction):
+    """Obtener una cuenta del inventario"""
+    if not has_access(interaction.user.id):
+        await interaction.response.send_message(
+            '❌ No tienes acceso a este comando. Usa `/get-key` para solicitar acceso.',
+            ephemeral=True
+        )
+        return
+    
+    if not accounts_data['available']:
+        await interaction.response.send_message(
+            '❌ No hay cuentas disponibles en este momento.',
+            ephemeral=True
+        )
+        return
+    
+    # Obtener la primera cuenta disponible
+    account = accounts_data['available'].pop(0)
+    save_accounts()
+    
+    # Enviar la cuenta via DM
+    try:
+        embed = discord.Embed(
+            title='📧 Cuenta Obtenida',
+            description='Aquí tienes tu cuenta:',
+            color=discord.Color.blue()
+        )
+        embed.add_field(name='📧 Correo', value=f'`{account["gmail"]}`', inline=False)
+        embed.add_field(name='🔒 Contraseña', value=f'`{account["password"]}`', inline=False)
+        embed.set_footer(text='¡Disfruta tu cuenta!')
+        
+        await interaction.user.send(embed=embed)
+        await interaction.response.send_message(
+            '✅ Tu cuenta ha sido enviada por mensaje privado.',
+            ephemeral=True
+        )
+        
+        # Registrar en logs
+        update_log(account, "CLAIMED")
+        
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            '❌ No puedo enviarte mensajes privados. Activa tus DMs y vuelve a intentarlo.',
+            ephemeral=True
+        )
+        # Devolver la cuenta al inventario si no se pudo enviar
+        accounts_data['available'].insert(0, account)
+        save_accounts()
+
+# --- Comandos de Prefijo (EXISTENTES) ---
 
 @bot.command(name='addaccount', help='Añade una cuenta de Microsoft (Email y Password). Formato: !addaccount <correo> <contraseña>')
 @commands.has_permissions(administrator=True)
