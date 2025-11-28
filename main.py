@@ -14,8 +14,14 @@ import string
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
 DISTRIBUTION_INTERVAL_MINUTES = 10.0
-# *** NUEVO: Canal para solicitudes de keys ***
-REQUEST_CHANNEL_ID = int(os.environ.get('REQUEST_CHANNEL_ID', CHANNEL_ID))
+
+# *** CORREGIDO: Configuración separada para canal de solicitudes ***
+try:
+    REQUEST_CHANNEL_ID = int(os.environ['REQUEST_CHANNEL_ID'])
+except (KeyError, ValueError):
+    # Si no existe o es inválido, usar un valor por defecto y mostrar advertencia
+    REQUEST_CHANNEL_ID = CHANNEL_ID
+    print("⚠️  REQUEST_CHANNEL_ID no configurado o inválido, usando CHANNEL_ID por defecto")
 
 # --- Rutas de Archivos ---
 DATA_DIR = 'data'
@@ -261,6 +267,8 @@ class KeyRequestView(discord.ui.View):
 async def on_ready():
     """Evento que se ejecuta cuando el bot está listo."""
     print(f'🤖 Bot conectado como {bot.user}!')
+    print(f'📊 Canal de distribución: {CHANNEL_ID}')
+    print(f'📨 Canal de solicitudes: {REQUEST_CHANNEL_ID}')
     load_accounts()
     load_keys()
     # Iniciar el bucle de distribución
@@ -614,8 +622,20 @@ async def add_account_error(ctx,error):
         print(f"Error inesperado en add_account: {error}")
         await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
 
+# --- Comando Sync para forzar sincronización ---
+@bot.command(name='sync')
+@commands.has_permissions(administrator=True)
+async def sync_commands(ctx):
+    """Sincroniza los comandos de barra con Discord"""
+    try:
+        synced = await bot.tree.sync()
+        await ctx.send(f"✅ Sincronizados {len(synced)} comandos de barra")
+        print(f"Comandos sincronizados: {len(synced)}")
+    except Exception as e:
+        await ctx.send(f"❌ Error sincronizando comandos: {e}")
+        print(f"Error sincronizando: {e}")
+
 # --- Keep Alive para Replit ---
-# ... (El resto del código de Keep Alive y Ejecución Final permanece sin cambios)
 
 app = Flask('')
 @app.route('/')
