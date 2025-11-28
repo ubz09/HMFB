@@ -9,6 +9,7 @@ from threading import Thread
 from flask import Flask
 import random
 import string
+import re
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
@@ -158,7 +159,6 @@ def clean_expired_keys():
     if expired_keys:
         save_keys()
 
-# *** NUEVO: Función para parsear el tiempo ***
 def parse_time_string(time_str):
     """
     Convierte strings como '6s', '6m', '6h', '6d' a segundos
@@ -167,19 +167,16 @@ def parse_time_string(time_str):
     if not time_str or time_str.lower() == 'permanent':
         return 0, "Permanente"
     
-    # Diccionario de unidades a segundos
     units = {
-        's': 1,           # segundos
-        'm': 60,          # minutos
-        'h': 3600,        # horas
-        'd': 86400,       # días
+        's': 1,
+        'm': 60,
+        'h': 3600,
+        'd': 86400,
     }
     
     total_seconds = 0
     time_parts = []
     
-    # Separar números y letras usando regex simple
-    import re
     matches = re.findall(r'(\d+)([smhd])', time_str.lower())
     
     if not matches:
@@ -190,7 +187,6 @@ def parse_time_string(time_str):
         seconds = number * units[unit]
         total_seconds += seconds
         
-        # Crear texto legible
         if unit == 's':
             time_parts.append(f"{number} segundo{'s' if number != 1 else ''}")
         elif unit == 'm':
@@ -209,25 +205,91 @@ async def clean_keys_task():
     """Limpia keys expiradas cada hora."""
     clean_expired_keys()
 
-# *** Clase Modal para /get-key ***
-class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key'):
-    def __init__(self):
-        super().__init__()
+# *** CORREGIDO: Clase Modal para /get-key ***
+class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
+    def __init__(self, bot_instance):
+        super().__init__(timeout=300)
+        self.bot = bot_instance
     
     name = discord.ui.TextInput(
-        label='Nombre',
-        placeholder='Ingresa tu nombre completo',
+        label='Nombre Completo',
+        placeholder='Ingresa tu nombre y apellido',
         required=True,
         max_length=100
     )
     
     reason = discord.ui.TextInput(
-        label='Razón de la solicitud',
-        placeholder='Explica por qué necesitas acceso',
+        label='Razón de la Solicitud',
+        placeholder='Explica detalladamente por qué necesitas acceso a las cuentas',
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=500
     )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # VERIFICAR que el canal de solicitudes esté configurado
+        if not REQUESTS_CHANNEL_ID:
+            await interaction.response.send_message(
+                '❌ El sistema de solicitudes no está configurado correctamente.',
+                ephemeral=True
+            )
+            return
+
+        # OBTENER el canal de solicitudes (1444096607095099473)
+        requests_channel = self.bot.get_channel(REQUESTS_CHANNEL_ID)
+        if not requests_channel:
+            await interaction.response.send_message(
+                '❌ No se pudo encontrar el canal de solicitudes de administradores.',
+                ephemeral=True
+            )
+            return
+
+        # ENVIAR la solicitud al canal de administradores (1444096607095099473)
+        try:
+            embed = discord.Embed(
+                title='🔑 Nueva Solicitud de Key - PENDIENTE',
+                description=f'Solicitud de key de {interaction.user.mention}',
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name='👤 Nombre', value=self.name.value, inline=False)
+            embed.add_field(name='📝 Razón', value=self.reason.value, inline=False)
+            embed.add_field(name='🆔 User ID', value=interaction.user.id, inline=True)
+            embed.add_field(name='📅 Fecha', value=f"<t:{int(datetime.now().timestamp())}:F>", inline=True)
+            embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+            embed.set_footer(text='Usa los botones de abajo para aceptar o rechazar la solicitud')
+            
+            view = KeyRequestView(interaction.user.id, self.name.value, self.reason.value)
+            
+            # ⚠️ ESTA ES LA LÍNEA IMPORTANTE: Enviar al canal de solicitudes
+            await requests_channel.send(embed=embed, view=view)
+            
+            # Confirmar al usuario en el canal actual
+            await interaction.response.send_message(
+                '✅ Tu solicitud ha sido enviada correctamente a los administradores. '
+                'Te notificaremos cuando sea revisada.',
+                ephemeral=True
+            )
+            
+            print(f"📨 Nueva solicitud de key enviada por {interaction.user.name} al canal {REQUESTS_CHANNEL_ID}")
+            
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                '❌ Error: No tengo permisos para enviar mensajes al canal de solicitudes.',
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(
+                f'❌ Error al enviar la solicitud: {str(e)}',
+                ephemeral=True
+            )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await interaction.response.send_message(
+            '❌ Ocurrió un error al procesar tu solicitud. Por favor, intenta nuevamente.',
+            ephemeral=True
+        )
+        print(f"Error en modal de key request: {error}")
 
 # *** View para los botones de aceptar/rechazar ***
 class KeyRequestView(discord.ui.View):
@@ -239,20 +301,33 @@ class KeyRequestView(discord.ui.View):
     
     @discord.ui.button(label='Aceptar', style=discord.ButtonStyle.success, custom_id='accept_key')
     async def accept_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Verificar permisos de administrador
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message('❌ Solo los administradores pueden usar este botón.', ephemeral=True)
+            return
+
         user = interaction.guild.get_member(self.user_id)
         if user:
             try:
+                # Crear canal privado (ticket)
                 overwrites = {
                     interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
                     user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
                     interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
                 }
                 
+                # Añadir permisos para administradores
+                for role in interaction.guild.roles:
+                    if role.permissions.administrator:
+                        overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                
                 channel = await interaction.guild.create_text_channel(
                     f'ticket-{user.display_name}',
-                    overwrites=overwrites
+                    overwrites=overwrites,
+                    reason=f'Ticket para key request de {user.display_name}'
                 )
                 
+                # Enviar mensaje en el ticket
                 embed = discord.Embed(
                     title='🎫 Ticket de Key Aceptado',
                     description=f'Hola {user.mention}, tu solicitud de key ha sido **aceptada**.',
@@ -260,19 +335,23 @@ class KeyRequestView(discord.ui.View):
                 )
                 embed.add_field(name='Nombre', value=self.user_name, inline=False)
                 embed.add_field(name='Razón', value=self.user_reason, inline=False)
+                embed.add_field(name='Aceptado por', value=interaction.user.mention, inline=False)
                 embed.add_field(name='Próximos pasos', value='Un administrador te proporcionará una key pronto.', inline=False)
                 
                 await channel.send(embed=embed)
                 await interaction.response.send_message(f'✅ Ticket creado: {channel.mention}', ephemeral=True)
                 
+                # Actualizar el embed original en el canal de solicitudes
                 embed_original = interaction.message.embeds[0]
+                embed_original.title = '🔑 Solicitud de Key - ACEPTADA ✅'
                 embed_original.color = discord.Color.green()
-                embed_original.add_field(name='Estado', value='✅ ACEPTADO', inline=False)
+                embed_original.add_field(name='Estado', value='✅ ACEPTADA', inline=False)
                 embed_original.add_field(name='Aceptado por', value=interaction.user.mention, inline=False)
                 embed_original.add_field(name='Ticket', value=channel.mention, inline=False)
                 
-                self.accept_key.disabled = True
-                self.reject_key.disabled = True
+                # Deshabilitar botones
+                for item in self.children:
+                    item.disabled = True
                 await interaction.message.edit(embed=embed_original, view=self)
                 
             except Exception as e:
@@ -282,17 +361,24 @@ class KeyRequestView(discord.ui.View):
     
     @discord.ui.button(label='Rechazar', style=discord.ButtonStyle.danger, custom_id='reject_key')
     async def reject_key(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Verificar permisos de administrador
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message('❌ Solo los administradores pueden usar este botón.', ephemeral=True)
+            return
+
         user = interaction.guild.get_member(self.user_id)
         if user:
             try:
+                # Notificar al usuario via DM
                 embed = discord.Embed(
                     title='❌ Solicitud de Key Rechazada',
                     description='Tu solicitud de key ha sido rechazada por un administrador.',
                     color=discord.Color.red()
                 )
                 embed.add_field(name='Nombre', value=self.user_name, inline=False)
-                embed.add_field(name='Razón', value=self.user_reason, inline=False)
+                embed.add_field(name='Razón de tu solicitud', value=self.user_reason, inline=False)
                 embed.add_field(name='Rechazado por', value=interaction.user.mention, inline=False)
+                embed.add_field(name='Motivo', value='Puedes contactar a un administrador para más información.', inline=False)
                 
                 await user.send(embed=embed)
                 await interaction.response.send_message('✅ Usuario notificado del rechazo', ephemeral=True)
@@ -300,13 +386,16 @@ class KeyRequestView(discord.ui.View):
             except:
                 await interaction.response.send_message('✅ Solicitud rechazada (no se pudo notificar al usuario via DM)', ephemeral=True)
         
+        # Actualizar el embed original en el canal de solicitudes
         embed_original = interaction.message.embeds[0]
+        embed_original.title = '🔑 Solicitud de Key - RECHAZADA ❌'
         embed_original.color = discord.Color.red()
-        embed_original.add_field(name='Estado', value='❌ RECHAZADO', inline=False)
+        embed_original.add_field(name='Estado', value='❌ RECHAZADA', inline=False)
         embed_original.add_field(name='Rechazado por', value=interaction.user.mention, inline=False)
         
-        self.accept_key.disabled = True
-        self.reject_key.disabled = True
+        # Deshabilitar botones
+        for item in self.children:
+            item.disabled = True
         await interaction.message.edit(embed=embed_original, view=self)
 
 # --- Tasks y Eventos ---
@@ -399,40 +488,21 @@ async def on_reaction_add(reaction, user):
 
 # --- Comandos de Barra ---
 
-@bot.tree.command(name="get-key", description="Solicitar una key de acceso")
+@bot.tree.command(name="get-key", description="Solicitar una key de acceso a las cuentas")
 async def get_key(interaction: discord.Interaction):
     """Comando para solicitar una key de acceso"""
+    # Verificar que el canal de solicitudes esté configurado
     if not REQUESTS_CHANNEL_ID:
-        await interaction.response.send_message('❌ El sistema de solicitudes no está configurado.', ephemeral=True)
+        await interaction.response.send_message(
+            '❌ El sistema de solicitudes no está configurado. Contacta a un administrador.',
+            ephemeral=True
+        )
         return
     
-    modal = KeyRequestModal()
+    # Crear y mostrar el modal - PASAR LA INSTANCIA DEL BOT
+    modal = KeyRequestModal(bot)
     await interaction.response.send_modal(modal)
-    
-    await modal.wait()
-    
-    channel = bot.get_channel(REQUESTS_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(
-            title='🔑 Solicitud de Key - PENDIENTE',
-            description=f'Solicitud de key de {interaction.user.mention}',
-            color=discord.Color.orange(),
-            timestamp=datetime.now()
-        )
-        embed.add_field(name='👤 Nombre', value=modal.name.value, inline=False)
-        embed.add_field(name='📝 Razón', value=modal.reason.value, inline=False)
-        embed.add_field(name='🆔 User ID', value=interaction.user.id, inline=False)
-        embed.add_field(name='📅 Fecha', value=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), inline=False)
-        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        
-        view = KeyRequestView(interaction.user.id, modal.name.value, modal.reason.value)
-        await channel.send(embed=embed, view=view)
-        
-        await interaction.followup.send('✅ Tu solicitud ha sido enviada a los administradores.', ephemeral=True)
-    else:
-        await interaction.followup.send('❌ Error: Canal de solicitudes no encontrado.', ephemeral=True)
 
-# *** NUEVO: Comando /key con formato mejorado ***
 @bot.tree.command(name="key", description="Generar una key de acceso con tiempo específico (Admin)")
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(
@@ -443,10 +513,8 @@ async def generate_key_command(interaction: discord.Interaction, tiempo: str = "
     new_key = generate_key()
     
     try:
-        # Parsear el tiempo
         total_seconds, readable_time = parse_time_string(tiempo)
         
-        # Calcular fecha de expiración
         expires_at = None
         if total_seconds > 0:
             expires_at = datetime.now() + timedelta(seconds=total_seconds)
@@ -462,7 +530,6 @@ async def generate_key_command(interaction: discord.Interaction, tiempo: str = "
         keys_data['keys'][new_key] = key_data
         save_keys()
         
-        # Crear embed de respuesta
         embed = discord.Embed(
             title='🔑 Nueva Key Generada',
             description=f'**Key:** `{new_key}`',
@@ -478,7 +545,6 @@ async def generate_key_command(interaction: discord.Interaction, tiempo: str = "
             embed.add_field(name='⏰ Expira', value='Nunca', inline=True)
             embed.add_field(name='Estado', value='🟢 ACTIVA (Permanente)', inline=False)
         
-        # Ejemplos de uso
         examples = "**Ejemplos:**\n• `/key 6h` - 6 horas\n• `/key 2d12h` - 2 días y 12 horas\n• `/key 30m` - 30 minutos\n• `/key permanent` - Permanente"
         embed.add_field(name='💡 Formatos válidos', value=examples, inline=False)
         
@@ -577,10 +643,9 @@ async def cuenta_command(interaction: discord.Interaction):
         accounts_data['available'].insert(0, account)
         save_accounts()
 
-# --- Comandos de Prefijo (EXISTENTES) ---
-# ... (los mismos comandos de prefijo que antes)
+# --- Comandos de Prefijo ---
 
-@bot.command(name='addaccount')
+@bot.command(name='addaccount', help='Añade una cuenta de Microsoft (Email y Password). Formato: !addaccount <correo> <contraseña>')
 @commands.has_permissions(administrator=True)
 async def add_account(ctx, email: str, password: str):
     email_lower = email.lower()
@@ -607,7 +672,7 @@ async def add_account(ctx, email: str, password: str):
     embed.add_field(name="Inventario Total", value=f"{len(accounts_data['available'])} disponibles")
     await ctx.send(embed=embed)
 
-@bot.command(name='importaccounts')
+@bot.command(name='importaccounts', help='Importa varias cuentas desde archivo import_accounts.txt con formato: correo:contraseña')
 @commands.has_permissions(administrator=True)
 async def import_accounts(ctx):
     file_path = "import_accounts.txt"
@@ -668,6 +733,17 @@ async def import_accounts(ctx):
         f"❌ Fallidas (formato incorrecto): **{fail_count}**."
     )
 
+@add_account.error
+async def add_account_error(ctx,error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ Uso incorrecto: `!addaccount <correo_completo> <contraseña>`")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Permiso denegado. Solo administradores pueden usar este comando.")
+    else:
+        print(f"Error inesperado en add_account: {error}")
+        await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
+
+# --- Comando Sync ---
 @bot.command(name='sync')
 @commands.has_permissions(administrator=True)
 async def sync_commands(ctx):
