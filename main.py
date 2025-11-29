@@ -14,7 +14,7 @@ import re
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
-DISTRIBUTION_INTERVAL_MINUTES = 10.0
+DISTRIBUTION_INTERVAL_MINUTES = 60.0
 
 # *** CORREGIDO: Canal separado para solicitudes de Admins ***
 try:
