@@ -205,53 +205,73 @@ async def clean_keys_task():
     """Limpia keys expiradas cada hora."""
     clean_expired_keys()
 
-# *** NUEVO: View para borrar tickets ***
+# *** VIEWS MEJORADAS PARA BORRAR TICKETS ***
+class ConfirmDeleteView(discord.ui.View):
+    def __init__(self, user):
+        super().__init__(timeout=60)
+        self.user = user
+    
+    @discord.ui.button(label='✅ Sí, Eliminar', style=discord.ButtonStyle.danger)
+    async def confirm_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.user:
+            await interaction.response.send_message('❌ Esta confirmación no es para ti.', ephemeral=True)
+            return
+        
+        try:
+            await interaction.response.defer(ephemeral=True)
+            channel_name = interaction.channel.name
+            await interaction.followup.send('🗑️ Eliminando ticket...', ephemeral=True)
+            await interaction.channel.delete(reason=f'Ticket eliminado por {interaction.user.name}')
+            print(f"🗑️ Ticket eliminado: {channel_name} por {interaction.user.name}")
+        except Exception as e:
+            await interaction.followup.send(f'❌ Error al eliminar el ticket: {e}', ephemeral=True)
+    
+    @discord.ui.button(label='❌ Cancelar', style=discord.ButtonStyle.secondary)
+    async def cancel_delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.user:
+            await interaction.response.send_message('❌ Esta confirmación no es para ti.', ephemeral=True)
+            return
+        await interaction.response.send_message('✅ Eliminación cancelada.', ephemeral=True)
+
 class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
     
     @discord.ui.button(label='🗑️ Borrar Ticket', style=discord.ButtonStyle.danger, custom_id='delete_ticket')
     async def delete_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Verificar que sea un administrador o el usuario del ticket
-        user_has_permission = (
-            interaction.user.guild_permissions.administrator or 
-            interaction.user.name in interaction.channel.name
-        )
-        
-        if not user_has_permission:
-            await interaction.response.send_message(
-                '❌ Solo los administradores o el dueño del ticket pueden borrarlo.',
-                ephemeral=True
+        try:
+            # Verificar permisos de administrador
+            if interaction.user.guild_permissions.administrator:
+                user_has_permission = True
+            else:
+                # Verificar si es el dueño del ticket buscando su mención en el embed
+                user_has_permission = False
+                if interaction.message and interaction.message.embeds:
+                    embed = interaction.message.embeds[0]
+                    if hasattr(embed, 'description') and embed.description:
+                        if str(interaction.user.mention) in embed.description:
+                            user_has_permission = True
+            
+            if not user_has_permission:
+                await interaction.response.send_message(
+                    '❌ Solo los administradores o el dueño del ticket pueden borrarlo.',
+                    ephemeral=True
+                )
+                return
+            
+            # Crear vista de confirmación
+            confirm_view = ConfirmDeleteView(interaction.user)
+            confirm_embed = discord.Embed(
+                title='⚠️ Confirmar Eliminación',
+                description='¿Estás seguro de que quieres eliminar este ticket? Esta acción no se puede deshacer.',
+                color=discord.Color.orange()
             )
-            return
-        
-        # Confirmar eliminación
-        confirm_embed = discord.Embed(
-            title='⚠️ Confirmar Eliminación',
-            description='¿Estás seguro de que quieres eliminar este ticket? Esta acción no se puede deshacer.',
-            color=discord.Color.orange()
-        )
-        
-        confirm_view = discord.ui.View(timeout=30)
-        
-        @discord.ui.button(label='✅ Sí, Eliminar', style=discord.ButtonStyle.danger)
-        async def confirm_delete(interaction: discord.Interaction, button: discord.ui.Button):
-            try:
-                channel_name = interaction.channel.name
-                await interaction.response.send_message('🗑️ Eliminando ticket...', ephemeral=True)
-                await interaction.channel.delete(reason=f'Ticket eliminado por {interaction.user.name}')
-                print(f"🗑️ Ticket eliminado: {channel_name} por {interaction.user.name}")
-            except Exception as e:
-                await interaction.response.send_message(f'❌ Error al eliminar el ticket: {e}', ephemeral=True)
-        
-        @discord.ui.button(label='❌ Cancelar', style=discord.ButtonStyle.secondary)
-        async def cancel_delete(interaction: discord.Interaction, button: discord.ui.Button):
-            await interaction.response.send_message('✅ Eliminación cancelada.', ephemeral=True)
-        
-        confirm_view.add_item(confirm_delete)
-        confirm_view.add_item(cancel_delete)
-        
-        await interaction.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
+            
+            await interaction.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
+            
+        except Exception as e:
+            print(f"Error en delete_ticket: {e}")
+            await interaction.response.send_message('❌ Error al procesar la solicitud.', ephemeral=True)
 
 # *** Clase Modal para /get-key ***
 class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
@@ -450,6 +470,10 @@ async def on_ready():
     print(f'📨 Canal de solicitudes (Admins): {REQUESTS_CHANNEL_ID}')
     load_accounts()
     load_keys()
+    
+    # *** NUEVO: Registrar las Views persistentes ***
+    bot.add_view(TicketView())
+    bot.add_view(KeyRequestView(0, "", ""))  # View base para solicitudes
     
     try:
         synced = await bot.tree.sync()
