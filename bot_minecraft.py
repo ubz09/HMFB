@@ -171,7 +171,7 @@ class MinecraftVerifier:
         return None
     
     async def get_minecraft_profile(self, session, mc_token):
-        """Obtiene el perfil de Minecraft - EXTIENDE AUTOMÁTICAMENTE EL IGN"""
+        """Obtiene el perfil de Minecraft"""
         try:
             headers = {
                 'Authorization': f'Bearer {mc_token}',
@@ -189,7 +189,6 @@ class MinecraftVerifier:
                     uuid = profile_data.get('id', 'N/A')
                     capes = [cape["alias"] for cape in profile_data.get("capes", [])]
                     
-                    # ✅ AQUÍ ES DONDE EXTRAE EL IGN AUTOMÁTICAMENTE
                     return {
                         'username': username,
                         'uuid': uuid,
@@ -198,7 +197,6 @@ class MinecraftVerifier:
                         'has_minecraft': True
                     }
                 elif response.status == 404:
-                    # Cuenta no tiene perfil de Minecraft (sin IGN)
                     return {
                         'username': 'N/A',
                         'uuid': 'N/A', 
@@ -239,8 +237,8 @@ class MinecraftVerifier:
         return False
     
     async def verify_account(self, email, password):
-        """Verifica una cuenta completa de Minecraft - CON EXTRACCIÓN DE IGN"""
-        logger.info(f"🔍 Verificando cuenta y extrayendo IGN: {email}")
+        """Verifica una cuenta completa de Minecraft"""
+        logger.info(f"Verificando cuenta: {email}")
         
         async with aiohttp.ClientSession() as session:
             try:
@@ -274,7 +272,7 @@ class MinecraftVerifier:
                         "has_minecraft": False
                     }
                 
-                # Paso 4: Perfil Minecraft - ✅ AQUÍ EXTRAE EL IGN
+                # Paso 4: Perfil Minecraft
                 profile = await self.get_minecraft_profile(session, mc_token)
                 if not profile['success']:
                     return {
@@ -306,15 +304,14 @@ class MinecraftVerifier:
 
 class MinecraftBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.messages = True
-        intents.dm_messages = True
-        intents.message_content = True
+        # ✅ CORREGIDO: Habilitar todos los intents necesarios
+        intents = discord.Intents.all()
         
         super().__init__(
             command_prefix="!",
             intents=intents,
-            help_command=None
+            help_command=None,
+            case_insensitive=True  # ✅ Comandos case insensitive
         )
         
         self.verifier = MinecraftVerifier()
@@ -323,27 +320,63 @@ class MinecraftBot(commands.Bot):
         
     async def on_ready(self):
         logger.info(f'🤖 Bot conectado como {self.user.name}')
-        await self.change_presence(activity=discord.Game(name="Verificando cuentas Minecraft | !help"))
+        logger.info(f'📊 Conectado a {len(self.guilds)} servidores')
+        logger.info(f'🎯 ID del Bot: {self.user.id}')
+        
+        # ✅ Cambiar presencia para indicar que está activo
+        await self.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching, 
+                name="!help para comandos"
+            )
+        )
+        
+        # ✅ Cargar comandos
+        await self.load_extension_commands()
+    
+    async def load_extension_commands(self):
+        """Cargar comandos manualmente"""
+        try:
+            # Comando help
+            @self.command(name='help')
+            async def help_command(ctx):
+                await self.help_cmd(ctx)
+            
+            # Comando stats
+            @self.command(name='stats')
+            async def stats_command(ctx):
+                await self.stats_cmd(ctx)
+            
+            # Comando verify (para servidores)
+            @self.command(name='verify')
+            async def verify_command(ctx, *, account_data=None):
+                await self.verify_cmd(ctx, account_data)
+                
+            logger.info("✅ Comandos cargados correctamente")
+        except Exception as e:
+            logger.error(f"❌ Error cargando comandos: {e}")
     
     async def on_message(self, message):
+        # Ignorar mensajes del bot mismo
         if message.author == self.user:
             return
         
-        # Solo responder a DMs
+        # ✅ CORREGIDO: Procesar comandos PRIMERO
+        await self.process_commands(message)
+        
+        # Luego manejar DMs para verificaciones
         if isinstance(message.channel, discord.DMChannel):
             await self.handle_dm(message)
-        
-        await self.process_commands(message)
     
     async def handle_dm(self, message):
-        """Maneja mensajes directos - CON EXIGENCIA DE IGN"""
+        """Maneja mensajes directos para verificaciones"""
         content = message.content.strip()
         
-        # Ignorar comandos
+        # Ignorar comandos que empiecen con prefix
         if content.startswith('!'):
             return
         
-        # Verificar formato
+        # Verificar formato de cuenta (email:password)
         if ':' not in content:
             embed = discord.Embed(
                 title="❌ Formato Incorrecto",
@@ -353,7 +386,7 @@ class MinecraftBot(commands.Bot):
             await message.reply(embed=embed)
             return
         
-        # Limitar intentos
+        # Limitar intentos por usuario
         user_id = message.author.id
         if user_id not in self.user_attempts:
             self.user_attempts[user_id] = {'count': 0, 'last_attempt': time.time()}
@@ -368,7 +401,7 @@ class MinecraftBot(commands.Bot):
         if user_data['count'] >= 5:
             embed = discord.Embed(
                 title="⏰ Límite Alcanzado",
-                description="Límite: 5 verificaciones cada 5 minutos.",
+                description="Has alcanzado el límite de 5 verificaciones cada 5 minutos.",
                 color=0xffa500
             )
             await message.reply(embed=embed)
@@ -377,10 +410,10 @@ class MinecraftBot(commands.Bot):
         user_data['count'] += 1
         user_data['last_attempt'] = time.time()
         
-        # Mensaje de procesamiento
+        # Mostrar mensaje de procesamiento
         processing_embed = discord.Embed(
             title="🔍 Verificando Cuenta...",
-            description="Extrayendo IGN y verificando Minecraft...",
+            description="Por favor espera mientras verificamos la cuenta de Minecraft.",
             color=0x00ffff
         )
         processing_msg = await message.reply(embed=processing_embed)
@@ -390,18 +423,16 @@ class MinecraftBot(commands.Bot):
             email, password = content.split(':', 1)
             result = await self.verifier.verify_account(email.strip(), password.strip())
             
-            # Log
+            # Log de verificación
             self.verification_log.append({
                 'user_id': user_id,
                 'username': str(message.author),
                 'email': email,
-                'minecraft_ign': result.get('minecraft_profile', {}).get('username', 'N/A'),
-                'has_minecraft': result.get('has_minecraft', False),
                 'success': result['success'],
                 'time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
             
-            # Guardar log
+            # Guardar log cada 10 verificaciones
             if len(self.verification_log) >= 10:
                 self.save_verification_log()
             
@@ -420,80 +451,47 @@ class MinecraftBot(commands.Bot):
             
             error_embed = discord.Embed(
                 title="❌ Error Interno",
-                description="Error al procesar la cuenta.",
+                description="Ocurrió un error interno al procesar la cuenta.",
                 color=0xff0000
             )
-            await message.reply(embed=embed)
+            await message.reply(embed=error_embed)
     
     async def send_success_embed(self, message, result):
-        """Envía embed de éxito - EXIGE MOSTRAR EL IGN"""
+        """Envía embed de éxito"""
         profile = result['minecraft_profile']
-        has_minecraft = result['has_minecraft']
         
-        # ✅ AQUÍ ES DONDE EXIGE MOSTRAR EL IGN
-        if has_minecraft and profile['username'] != 'N/A':
-            # Cuenta VÁLIDA con IGN
-            embed = discord.Embed(
-                title="✅ **CUENTA VERIFICADA CON IGN**",
-                description=f"**¡Cuenta verificada exitosamente!**\nEl IGN ha sido extraído automáticamente.",
-                color=0x00ff00,
-                timestamp=datetime.now()
-            )
-            
+        embed = discord.Embed(
+            title="✅ **CUENTA VERIFICADA**",
+            description=f"La cuenta ha sido verificada exitosamente.",
+            color=0x00ff00,
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(
+            name="👤 Información de la Cuenta",
+            value=f"**Email:** ||{result['email']}||\n**Tipo:** {'Minecraft Java Edition' if result['has_minecraft'] else 'Correo Válido'}",
+            inline=False
+        )
+        
+        if profile['username'] != 'N/A':
             embed.add_field(
-                name="👤 INFORMACIÓN DE LA CUENTA",
-                value=f"**Email:** ||{result['email']}||\n**Contraseña:** ||{result.get('password', 'N/A')}||",
+                name="🎮 Perfil de Minecraft",
+                value=f"**Usuario:** `{profile['username']}`\n**UUID:** `{profile['uuid']}`\n**Capas:** {profile['capes']}",
                 inline=False
             )
             
-            embed.add_field(
-                name="🎮 **IGN DE MINECRAFT**",
-                value=f"```\n{profile['username']}\n```",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="📊 DETALLES TÉCNICOS",
-                value=f"**UUID:** `{profile['uuid']}`\n**Capas:** {profile['capes']}\n**Tiene Minecraft:** ✅ Sí",
-                inline=False
-            )
-            
-            # Agregar avatar de Minecraft
+            # Agregar avatar de Minecraft si tiene usuario
             embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{profile['username']}")
-            
-        elif has_minecraft and profile['username'] == 'N/A':
-            # Tiene Minecraft pero no tiene IGN (cuenta nueva)
-            embed = discord.Embed(
-                title="⚠️ **CUENTA CON MINECRAFT PERO SIN IGN**",
-                description="La cuenta tiene Minecraft pero no tiene nombre de usuario asignado.",
-                color=0xffa500,
-                timestamp=datetime.now()
-            )
-            
-            embed.add_field(
-                name="👤 INFORMACIÓN",
-                value=f"**Email:** ||{result['email']}||\n**Estado:** Cuenta nueva sin IGN\n**Tiene Minecraft:** ✅ Sí",
-                inline=False
-            )
-            
         else:
-            # Correo válido pero sin Minecraft
-            embed = discord.Embed(
-                title="📧 **CORREO VÁLIDO SIN MINECRAFT**",
-                description="La cuenta de Microsoft es válida pero no tiene Minecraft.",
-                color=0x3498db,
-                timestamp=datetime.now()
-            )
-            
             embed.add_field(
-                name="👤 INFORMACIÓN",
-                value=f"**Email:** ||{result['email']}||\n**Tiene Minecraft:** ❌ No\n**IGN:** No disponible",
+                name="🎮 Perfil de Minecraft",
+                value="**Usuario:** `No tiene IGN asignado`\n**Estado:** Cuenta nueva sin nombre",
                 inline=False
             )
         
         embed.add_field(
-            name="⏰ VERIFICACIÓN",
-            value=f"**Hora:** {result['verification_time']}\n**Estado:** Verificación completada",
+            name="📊 Estadísticas de Verificación",
+            value=f"**Verificado el:** {result['verification_time']}\n**Estado:** ✅ Válida",
             inline=False
         )
         
@@ -505,9 +503,9 @@ class MinecraftBot(commands.Bot):
         """Envía embed de error"""
         error_messages = {
             "INVALID_CREDENTIALS": "❌ **Credenciales Inválidas**\nEl email o contraseña son incorrectos.",
-            "2FA_REQUIRED": "⚠️ **Autenticación de Dos Factores**\nLa cuenta requiere 2FA.",
-            "TOO_MANY_ATTEMPTS": "🔒 **Demasiados Intentos**\nCuenta bloqueada temporalmente.",
-            "TIMEOUT": "⏰ **Timeout**\nLa verificación tardó demasiado tiempo.",
+            "2FA_REQUIRED": "⚠️ **Autenticación de Dos Factores**\nLa cuenta requiere 2FA y no puede ser verificada automáticamente.",
+            "TOO_MANY_ATTEMPTS": "🔒 **Demasiados Intentos**\nLa cuenta ha sido bloqueada temporalmente por muchos intentos fallidos.",
+            "TIMEOUT": "⏰ **Timeout**\nLa verificación tardó demasiado tiempo. Intenta nuevamente.",
             "AUTH_FAILED": "❌ **Error de Autenticación**\nFalló la autenticación con Microsoft."
         }
         
@@ -521,14 +519,8 @@ class MinecraftBot(commands.Bot):
         )
         
         embed.add_field(
-            name="📧 CUENTA",
+            name="📧 Cuenta Verificada",
             value=f"**Email:** ||{result['email']}||",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="🎮 IGN",
-            value="No se pudo extraer - Verificación fallida",
             inline=False
         )
         
@@ -543,46 +535,110 @@ class MinecraftBot(commands.Bot):
                 json.dump(self.verification_log, f, indent=2, ensure_ascii=False)
             self.verification_log.clear()
         except Exception as e:
-            logger.error(f"Error saving log: {e}")
+            logger.error(f"Error saving log: {e")
 
-    # Comandos del bot
-    @commands.command()
-    async def help(self, ctx):
+    # ✅ COMANDOS CORREGIDOS - Ahora funcionan en servidores
+    async def help_cmd(self, ctx):
         """Muestra ayuda del bot"""
         embed = discord.Embed(
             title="🤖 Minecraft Account Verifier",
-            description="**Verifica cuentas de Minecraft y extrae IGN automáticamente**",
+            description="Verifica cuentas de Minecraft automáticamente.",
             color=0x00ffff
         )
         
         embed.add_field(
-            name="📝 CÓMO USAR",
-            value="Envía un DM al bot con:\n`email:contraseña`\n\n**El bot extraerá automáticamente:**\n• IGN de Minecraft\n• UUID\n• Capas\n• Tipo de cuenta",
+            name="📝 Cómo Usar",
+            value="**En DMs:**\nEnvía: `email:contraseña`\n\n**En servidor:**\nUsa: `!verify email:contraseña`",
             inline=False
         )
         
         embed.add_field(
-            name="✅ RESULTADOS",
-            value="**Cuenta válida con IGN** ✅\n**Cuenta con Minecraft sin IGN** ⚠️\n**Correo válido sin Minecraft** 📧\n**Credenciales inválidas** ❌",
+            name="⚡ Comandos",
+            value="`!help` - Muestra esta ayuda\n`!stats` - Estadísticas del bot\n`!verify email:contraseña` - Verificar cuenta en servidor",
             inline=False
         )
         
         embed.add_field(
-            name="⚡ LÍMITES",
-            value="• 5 verificaciones cada 5 minutos\n• Solo por Mensajes Directos\n• Formato: email:contraseña",
+            name="🔧 Funcionalidades",
+            value="• Verificación automática de cuentas\n• Extracción de IGN de Minecraft\n• Detección de capas y UUID\n• Límites de uso para evitar spam",
             inline=False
         )
         
-        embed.set_footer(text="Bot especializado en extracción de IGN de Minecraft")
+        embed.set_footer(text="Bot creado para verificación segura de cuentas Minecraft")
         
         await ctx.send(embed=embed)
+    
+    async def stats_cmd(self, ctx):
+        """Estadísticas del bot"""
+        total_verifications = len(self.verification_log)
+        unique_users = len(self.user_attempts)
+        
+        embed = discord.Embed(
+            title="📊 Estadísticas del Bot",
+            color=0x00ff00
+        )
+        
+        embed.add_field(name="👥 Usuarios Únicos", value=unique_users, inline=True)
+        embed.add_field(name="🔍 Verificaciones Totales", value=total_verifications, inline=True)
+        embed.add_field(name="📈 Servidores", value=len(self.guilds), inline=True)
+        embed.add_field(name="⏰ Uptime", value=f"Activo", inline=True)
+        embed.add_field(name="🤖 Estado", value="✅ En línea", inline=True)
+        
+        await ctx.send(embed=embed)
+    
+    async def verify_cmd(self, ctx, account_data=None):
+        """Verifica una cuenta desde el servidor"""
+        if account_data is None:
+            embed = discord.Embed(
+                title="❌ Uso Incorrecto",
+                description="Usa: `!verify email:contraseña`",
+                color=0xff0000
+            )
+            await ctx.send(embed=embed)
+            return
+        
+        if ':' not in account_data:
+            embed = discord.Embed(
+                title="❌ Formato Incorrecto",
+                description="Formato correcto: `email:contraseña`",
+                color=0xff0000
+            )
+            await ctx.send(embed=embed)
+            return
+        
+        # Mostrar que se está procesando
+        processing_embed = discord.Embed(
+            title="🔍 Verificando Cuenta...",
+            description="Procesando solicitud del servidor...",
+            color=0x00ffff
+        )
+        processing_msg = await ctx.send(embed=processing_embed)
+        
+        try:
+            email, password = account_data.split(':', 1)
+            result = await self.verifier.verify_account(email.strip(), password.strip())
+            
+            await processing_msg.delete()
+            
+            if result["success"]:
+                await self.send_success_embed(ctx, result)
+            else:
+                await self.send_error_embed(ctx, result)
+                
+        except Exception as e:
+            await processing_msg.delete()
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description="Error procesando la cuenta.",
+                color=0xff0000
+            )
+            await ctx.send(embed=error_embed)
 
 # Configuración y ejecución
 def load_config():
     """Carga la configuración del bot"""
     config = {
         "token": os.getenv("DISCORD_TOKEN"),
-        "log_channel": os.getenv("LOG_CHANNEL_ID")
     }
     
     if not config["token"] and os.path.exists("config_bot.json"):
@@ -597,11 +653,11 @@ async def main():
     
     if not config["token"]:
         logger.error("❌ No se encontró el token del bot")
-        logger.info("💡 Crea config_bot.json con tu token o usa DISCORD_TOKEN")
+        logger.info("💡 Crea un archivo config_bot.json con:")
+        logger.info('{"token": "TU_TOKEN_AQUI"}')
         return
     
     bot = MinecraftBot()
-    bot.uptime = datetime.now()
     
     try:
         await bot.start(config["token"])
