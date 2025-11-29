@@ -10,6 +10,12 @@ from flask import Flask
 import random
 import string
 import re
+import requests
+import urllib3
+from urllib.parse import urlparse, parse_qs
+
+# Deshabilitar advertencias SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
@@ -199,13 +205,151 @@ def parse_time_string(time_str):
     readable_time = ", ".join(time_parts)
     return total_seconds, readable_time
 
-# *** Tarea para limpiar keys expiradas periódicamente ***
+# --- FUNCIONES DE VERIFICACIÓN DE CUENTAS MINECRAFT ---
+
+def get_minecraft_account_info(email, password):
+    """
+    Obtiene información de la cuenta de Minecraft usando email y contraseña.
+    Retorna: (success, data) donde data contiene name, uuid, token, etc.
+    """
+    try:
+        session = requests.Session()
+        session.verify = False
+        
+        # Paso 1: Obtener token de Microsoft
+        sFTTag_url = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
+        
+        # Obtener sFTTag y urlPost
+        text = session.get(sFTTag_url, timeout=15).text
+        match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
+        if not match:
+            return False, "No se pudo obtener sFTTag"
+        
+        sFTTag = match.group(1)
+        match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
+        if not match:
+            return False, "No se pudo obtener urlPost"
+        
+        urlPost = match.group(1)
+        
+        # Paso 2: Login con Microsoft
+        data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sFTTag}
+        login_request = session.post(urlPost, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=15)
+        
+        if '#' not in login_request.url or login_request.url == sFTTag_url:
+            return False, "Credenciales incorrectas o requiere 2FA"
+        
+        # Extraer token de acceso
+        token = parse_qs(urlparse(login_request.url).fragment).get('access_token', [None])[0]
+        if not token:
+            return False, "No se pudo obtener token de acceso"
+        
+        # Paso 3: Autenticación con Xbox
+        xbox_login = session.post('https://user.auth.xboxlive.com/user/authenticate', 
+                                 json={
+                                     "Properties": {
+                                         "AuthMethod": "RPS", 
+                                         "SiteName": "user.auth.xboxlive.com", 
+                                         "RpsTicket": token
+                                     }, 
+                                     "RelyingParty": "http://auth.xboxlive.com", 
+                                     "TokenType": "JWT"
+                                 }, 
+                                 headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, 
+                                 timeout=15)
+        
+        if xbox_login.status_code != 200:
+            return False, "Error en autenticación Xbox"
+        
+        xbox_data = xbox_login.json()
+        xbox_token = xbox_data.get('Token')
+        uhs = xbox_data['DisplayClaims']['xui'][0]['uhs']
+        
+        if not xbox_token:
+            return False, "No se pudo obtener token Xbox"
+        
+        # Paso 4: XSTS Token
+        xsts = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', 
+                           json={
+                               "Properties": {
+                                   "SandboxId": "RETAIL", 
+                                   "UserTokens": [xbox_token]
+                               }, 
+                               "RelyingParty": "rp://api.minecraftservices.com/", 
+                               "TokenType": "JWT"
+                           }, 
+                           headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, 
+                           timeout=15)
+        
+        if xsts.status_code != 200:
+            return False, "Error en XSTS authentication"
+        
+        xsts_data = xsts.json()
+        xsts_token = xsts_data.get('Token')
+        
+        if not xsts_token:
+            return False, "No se pudo obtener token XSTS"
+        
+        # Paso 5: Token de Minecraft
+        mc_login = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', 
+                               json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, 
+                               headers={'Content-Type': 'application/json'}, 
+                               timeout=15)
+        
+        if mc_login.status_code != 200:
+            return False, "Error en login de Minecraft"
+        
+        mc_data = mc_login.json()
+        access_token = mc_data.get('access_token')
+        
+        if not access_token:
+            return False, "No se pudo obtener token de Minecraft"
+        
+        # Paso 6: Obtener perfil de Minecraft
+        profile_response = session.get('https://api.minecraftservices.com/minecraft/profile', 
+                                      headers={'Authorization': f'Bearer {access_token}'})
+        
+        if profile_response.status_code != 200:
+            return False, "La cuenta no tiene Minecraft o no tiene skin"
+        
+        profile_data = profile_response.json()
+        
+        # Paso 7: Verificar licencia
+        license_response = session.get('https://api.minecraftservices.com/entitlements/license', 
+                                      headers={'Authorization': f'Bearer {access_token}'})
+        
+        account_type = "Cuenta de Minecraft"
+        if license_response.status_code == 200:
+            license_data = license_response.json()
+            items = license_data.get("items", [])
+            
+            for item in items:
+                name = item.get("name", "")
+                if name in ("game_minecraft", "product_minecraft"):
+                    account_type = "Minecraft Java Edition"
+                elif name == "product_minecraft_bedrock":
+                    account_type = "Minecraft Bedrock Edition"
+        
+        session.close()
+        
+        return True, {
+            'name': profile_data.get('name', 'N/A'),
+            'uuid': profile_data.get('id', 'N/A'),
+            'capes': [cape["alias"] for cape in profile_data.get("capes", [])],
+            'account_type': account_type,
+            'token': access_token
+        }
+        
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+# --- Tarea para limpiar keys expiradas periódicamente ---
 @tasks.loop(hours=1)
 async def clean_keys_task():
     """Limpia keys expiradas cada hora."""
     clean_expired_keys()
 
-# *** VIEWS MEJORADAS PARA BORRAR TICKETS ***
+# --- VIEWS MEJORADAS PARA BORRAR TICKETS ---
 class ConfirmDeleteView(discord.ui.View):
     def __init__(self, user):
         super().__init__(timeout=60)
@@ -273,7 +417,7 @@ class TicketView(discord.ui.View):
             print(f"Error en delete_ticket: {e}")
             await interaction.response.send_message('❌ Error al procesar la solicitud.', ephemeral=True)
 
-# *** Clase Modal para /get-key ***
+# --- Clase Modal para /get-key ---
 class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
     def __init__(self, bot_instance):
         super().__init__(timeout=300)
@@ -354,7 +498,7 @@ class KeyRequestModal(discord.ui.Modal, title='Solicitud de Key de Acceso'):
         )
         print(f"Error en modal de key request: {error}")
 
-# *** View para los botones de aceptar/rechazar ***
+# --- View para los botones de aceptar/rechazar ---
 class KeyRequestView(discord.ui.View):
     def __init__(self, user_id, user_name, user_reason):
         super().__init__(timeout=None)
@@ -683,6 +827,8 @@ async def cuenta_command(interaction: discord.Interaction):
     save_accounts()
     
     try:
+        # *** NUEVO: Verificar información de Minecraft ***
+        minecraft_info = "Verificando..."
         embed = discord.Embed(
             title='📧 Cuenta Obtenida',
             description='Aquí tienes tu cuenta:',
@@ -690,13 +836,57 @@ async def cuenta_command(interaction: discord.Interaction):
         )
         embed.add_field(name='📧 Correo', value=f'`{account["gmail"]}`', inline=False)
         embed.add_field(name='🔒 Contraseña', value=f'`{account["password"]}`', inline=False)
+        embed.add_field(name='🎮 Información Minecraft', value=minecraft_info, inline=False)
         embed.set_footer(text='¡Disfruta tu cuenta!')
         
+        # Enviar mensaje inicial
         await interaction.user.send(embed=embed)
         await interaction.response.send_message(
             '✅ Tu cuenta ha sido enviada por mensaje privado.',
             ephemeral=True
         )
+        
+        # Verificar información de Minecraft en segundo plano
+        async def verify_minecraft_info():
+            try:
+                success, mc_data = get_minecraft_account_info(account["gmail"], account["password"])
+                
+                if success:
+                    capes_text = ", ".join(mc_data['capes']) if mc_data['capes'] else "Ninguno"
+                    minecraft_details = (
+                        f"**IGN:** `{mc_data['name']}`\n"
+                        f"**UUID:** `{mc_data['uuid']}`\n"
+                        f"**Tipo:** {mc_data['account_type']}\n"
+                        f"**Capes:** {capes_text}"
+                    )
+                else:
+                    minecraft_details = f"**Error:** {mc_data}\n*La cuenta puede no tener Minecraft o las credenciales son incorrectas.*"
+                
+                # Actualizar el embed con la información de Minecraft
+                updated_embed = discord.Embed(
+                    title='📧 Cuenta Obtenida',
+                    description='Aquí tienes tu cuenta:',
+                    color=discord.Color.green() if success else discord.Color.orange()
+                )
+                updated_embed.add_field(name='📧 Correo', value=f'`{account["gmail"]}`', inline=False)
+                updated_embed.add_field(name='🔒 Contraseña', value=f'`{account["password"]}`', inline=False)
+                updated_embed.add_field(name='🎮 Información Minecraft', value=minecraft_details, inline=False)
+                updated_embed.set_footer(text='¡Disfruta tu cuenta!')
+                
+                # Enviar mensaje actualizado
+                await interaction.user.send(embed=updated_embed)
+                
+            except Exception as e:
+                error_embed = discord.Embed(
+                    title='❌ Error al verificar Minecraft',
+                    description=f'Ocurrió un error al verificar la cuenta de Minecraft: {str(e)}',
+                    color=discord.Color.red()
+                )
+                await interaction.user.send(embed=error_embed)
+        
+        # Ejecutar la verificación en segundo plano
+        import asyncio
+        asyncio.create_task(verify_minecraft_info())
         
         update_log(account, "CLAIMED")
         
