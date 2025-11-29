@@ -3,3 +3,4 @@ python-dotenv
 flask
 requests
 urllib3
+colorama
