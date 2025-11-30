@@ -14,7 +14,7 @@ import re
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
-DISTRIBUTION_INTERVAL_MINUTES = 10.0
+DISTRIBUTION_INTERVAL_MINUTES = 30.0
 
 # *** CORREGIDO: Canal separado para solicitudes de Admins ***
 try:
@@ -41,19 +41,19 @@ DATA_DIR = 'data'
 ACCOUNTS_FILE = os.path.join(DATA_DIR, 'accounts.json')
 LOGS_FILE = os.path.join(DATA_DIR, 'logs.txt')
 KEYS_FILE = os.path.join(DATA_DIR, 'keys.json')
-TEMPORARY_ROLES_FILE = os.path.join(DATA_DIR, 'temporary_roles.json')  # NUEVO
+TEMPORARY_ROLES_FILE = os.path.join(DATA_DIR, 'temporary_roles.json')
 
 # Asegurarse de que las carpetas y archivos existan
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-for file_path in [ACCOUNTS_FILE, LOGS_FILE, KEYS_FILE, TEMPORARY_ROLES_FILE]:  # MODIFICADO
+for file_path in [ACCOUNTS_FILE, LOGS_FILE, KEYS_FILE, TEMPORARY_ROLES_FILE]:
     if not os.path.exists(file_path):
         if file_path.endswith('.json'):
             if file_path == KEYS_FILE:
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump({'keys': {}, 'users_with_access': []}, f, indent=4)
-            elif file_path == TEMPORARY_ROLES_FILE:  # NUEVO
+            elif file_path == TEMPORARY_ROLES_FILE:
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump({'active_roles': {}}, f, indent=4)
             else:
@@ -125,7 +125,7 @@ def save_keys():
     except Exception as e:
         print(f"Error guardando keys: {e}")
 
-def load_temporary_roles():  # NUEVA FUNCIÓN
+def load_temporary_roles():
     """Carga los roles temporales activos desde el archivo JSON."""
     try:
         with open(TEMPORARY_ROLES_FILE, 'r', encoding='utf-8') as f:
@@ -133,7 +133,7 @@ def load_temporary_roles():  # NUEVA FUNCIÓN
     except:
         return {'active_roles': {}}
 
-def save_temporary_roles(data):  # NUEVA FUNCIÓN
+def save_temporary_roles(data):
     """Guarda los roles temporales en el archivo JSON."""
     try:
         with open(TEMPORARY_ROLES_FILE, 'w', encoding='utf-8') as f:
@@ -141,16 +141,24 @@ def save_temporary_roles(data):  # NUEVA FUNCIÓN
     except Exception as e:
         print(f"Error guardando roles temporales: {e}")
 
-async def remove_temporary_role(guild, user_id, role_id):  # NUEVA FUNCIÓN
+async def remove_temporary_role(guild, user_id, role_id):
     """Elimina un rol temporal de un usuario."""
     try:
         member = guild.get_member(user_id)
         role = guild.get_role(role_id)
         
         if member and role:
+            # Verificar que el bot puede gestionar el rol
+            if role.position >= guild.me.top_role.position:
+                print(f"⚠️ No puedo eliminar el rol {role.name} - está por encima de mi rol")
+                return False
+            
             await member.remove_roles(role)
             print(f"🔹 Rol temporal removido: {role.name} de {member.display_name}")
             return True
+        else:
+            print(f"⚠️ Miembro o rol no encontrado al intentar remover: user_id={user_id}, role_id={role_id}")
+            return False
     except Exception as e:
         print(f"Error removiendo rol temporal: {e}")
     return False
@@ -252,7 +260,7 @@ async def clean_keys_task():
     """Limpia keys expiradas cada hora."""
     clean_expired_keys()
 
-# *** Tarea para verificar roles temporales (NUEVA) ***
+# *** Tarea para verificar roles temporales ***
 @tasks.loop(minutes=1)
 async def check_temporary_roles():
     """Verifica y elimina roles temporales expirados."""
@@ -276,6 +284,11 @@ async def check_temporary_roles():
                     )
                     if success:
                         roles_to_remove.append(role_data_key)
+                    else:
+                        print(f"⚠️ No se pudo eliminar rol temporal: {role_data_key}")
+                else:
+                    print(f"⚠️ Servidor no encontrado para rol temporal: {role_data_key}")
+                    roles_to_remove.append(role_data_key)  # Limpiar si el servidor no existe
         
         # Eliminar roles expirados del archivo
         for role_key in roles_to_remove:
@@ -666,26 +679,51 @@ async def on_raw_reaction_add(payload):
             await member.add_roles(role)
             print(f"✅ Usuario verificado: {member.display_name}")
             
-            # Opcional: Enviar mensaje de bienvenida por DM
+            # ENVIAR MENSAJE DE BIENVENIDA BILINGÜE POR DM
             try:
                 welcome_embed = discord.Embed(
-                    title="🎉 ¡Verificación Completada!",
-                    description=f"Te has verificado correctamente en **{guild.name}**",
+                    title="🎉 ¡Verificación Completada! | Verification Completed!",
                     color=discord.Color.green()
                 )
+                
+                # Sección en Español
                 welcome_embed.add_field(
-                    name="¡Bienvenido/a!", 
-                    value="Ahora tienes acceso a todos los canales del servidor. "
-                         "¡Disfruta de tu estancia!",
+                    name="🇪🇸 Español",
+                    value=(
+                        f"**¡Te has verificado correctamente en {guild.name}!**\n\n"
+                        "✅ **¡Bienvenido/a!** Ahora tienes acceso a todos los canales del servidor.\n"
+                        "🔓 **Acceso completo** a todas las áreas de la comunidad.\n"
+                        "👥 **Puedes interactuar** con otros miembros libremente.\n\n"
+                        "¡Disfruta de tu estancia en nuestra comunidad!"
+                    ),
                     inline=False
                 )
                 
+                # Sección en Inglés
+                welcome_embed.add_field(
+                    name="🇺🇸 English",
+                    value=(
+                        f"**You have been successfully verified in {guild.name}!**\n\n"
+                        "✅ **Welcome!** You now have access to all server channels.\n"
+                        "🔓 **Full access** to all community areas.\n"
+                        "👥 **You can interact** with other members freely.\n\n"
+                        "Enjoy your stay in our community!"
+                    ),
+                    inline=False
+                )
+                
+                welcome_embed.set_footer(text="Sistema de Verificación | Verification System")
+                
                 await member.send(embed=welcome_embed)
-            except:
-                pass  # No se pudo enviar DM, no es crítico
+                print(f"📩 Mensaje de bienvenida enviado a: {member.display_name}")
+                
+            except discord.Forbidden:
+                print(f"⚠️ No se pudo enviar DM a {member.display_name} (DMs cerrados)")
+            except Exception as e:
+                print(f"⚠️ Error al enviar DM de bienvenida: {e}")
                 
         except Exception as e:
-            print(f"Error en verificación automática: {e}")
+            print(f"❌ Error en verificación automática: {e}")
 
 # --- Comandos de Barra ---
 
@@ -842,11 +880,11 @@ async def cuenta_command(interaction: discord.Interaction):
         accounts_data['available'].insert(0, account)
         save_accounts()
 
-# NUEVO COMANDO: Sistema de verificación
+# NUEVO COMANDO: Sistema de verificación BILINGÜE
 @bot.tree.command(name="verify", description="Configura el sistema de verificación (Admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def verify_setup(interaction: discord.Interaction):
-    """Crea el embed de verificación con reacción"""
+    """Crea el embed de verificación con reacción - VERSIÓN BILINGÜE"""
     if not VERIFICATION_CHANNEL_ID or not VERIFICATION_ROLE_ID:
         await interaction.response.send_message(
             "❌ El sistema de verificación no está configurado correctamente. "
@@ -864,22 +902,42 @@ async def verify_setup(interaction: discord.Interaction):
         return
     
     try:
+        # EMBED DE VERIFICACIÓN BILINGÜE
         embed = discord.Embed(
-            title="🔐 Verificación de Usuario",
-            description=(
+            title="🔐 Verificación de Usuario | User Verification",
+            color=discord.Color.blue()
+        )
+        
+        # Sección en Español
+        embed.add_field(
+            name="🇪🇸 Español",
+            value=(
                 "**¡Bienvenido/a al servidor!**\n\n"
                 f"Para acceder a todos los canales del servidor, debes verificarte.\n"
                 f"Simplemente reacciona con {VERIFICATION_EMOJI} a este mensaje y "
                 f"se te asignará el rol de miembro verificado automáticamente.\n\n"
                 "**¿Problemas?** Contacta a un administrador."
             ),
-            color=discord.Color.blue()
+            inline=False
+        )
+        
+        # Sección en Inglés
+        embed.add_field(
+            name="🇺🇸 English",
+            value=(
+                "**Welcome to the server!**\n\n"
+                f"To access all server channels, you must verify yourself.\n"
+                f"Simply react with {VERIFICATION_EMOJI} to this message and "
+                f"the verified member role will be automatically assigned to you.\n\n"
+                "**Having issues?** Contact an administrator."
+            ),
+            inline=False
         )
         
         if VERIFICATION_IMAGE_URL:
             embed.set_image(url=VERIFICATION_IMAGE_URL)
         
-        embed.set_footer(text="Sistema de Verificación Automática")
+        embed.set_footer(text="Sistema de Verificación Automática | Automatic Verification System")
         
         message = await verification_channel.send(embed=embed)
         await message.add_reaction(VERIFICATION_EMOJI)
@@ -889,7 +947,7 @@ async def verify_setup(interaction: discord.Interaction):
             ephemeral=True
         )
         
-        print(f"✅ Sistema de verificación configurado por {interaction.user.name}")
+        print(f"✅ Sistema de verificación BILINGÜE configurado por {interaction.user.name}")
         
     except Exception as e:
         await interaction.response.send_message(
@@ -909,9 +967,27 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
     """Asigna un rol temporal a un usuario"""
     try:
         # Verificar que el bot puede gestionar el rol
-        if rol.position >= interaction.guild.me.top_role.position:
+        bot_member = interaction.guild.me
+        if rol.position >= bot_member.top_role.position:
             await interaction.response.send_message(
-                "❌ No puedo asignar este rol porque está por encima o igual a mi rol más alto.",
+                f"❌ No puedo asignar el rol **{rol.name}** porque está por encima o igual a mi rol más alto ({bot_member.top_role.name}).\n"
+                f"**Solución:** Mueve mi rol ({bot_member.top_role.name}) por encima del rol {rol.name} en la configuración del servidor.",
+                ephemeral=True
+            )
+            return
+        
+        # Verificar que el usuario que ejecuta el comando puede asignar el rol
+        if rol.position >= interaction.user.top_role.position and interaction.user != interaction.guild.owner:
+            await interaction.response.send_message(
+                f"❌ No puedes asignar el rol **{rol.name}** porque está por encima o igual a tu rol más alto.",
+                ephemeral=True
+            )
+            return
+        
+        # Verificar que no se asigne a bots
+        if usuario.bot:
+            await interaction.response.send_message(
+                "❌ No puedes asignar roles temporales a bots.",
                 ephemeral=True
             )
             return
@@ -926,8 +1002,13 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
             )
             return
         
-        # Calcular fecha de expiración
-        expires_at = datetime.now() + timedelta(seconds=total_seconds)
+        # Verificar si el usuario ya tiene el rol
+        if rol in usuario.roles:
+            await interaction.response.send_message(
+                f"ℹ️ El usuario {usuario.mention} ya tiene el rol {rol.mention}.",
+                ephemeral=True
+            )
+            return
         
         # Asignar el rol
         await usuario.add_roles(rol)
@@ -935,14 +1016,14 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
         # Guardar en el archivo de roles temporales
         data = load_temporary_roles()
         
-        role_key = f"{usuario.id}_{rol.id}"
+        role_key = f"{usuario.id}_{rol.id}_{interaction.guild.id}"
         data['active_roles'][role_key] = {
             'user_id': usuario.id,
             'role_id': rol.id,
             'guild_id': interaction.guild.id,
             'assigned_by': interaction.user.id,
             'assigned_at': datetime.now().isoformat(),
-            'expires_at': expires_at.isoformat(),
+            'expires_at': (datetime.now() + timedelta(seconds=total_seconds)).isoformat(),
             'duration': readable_time
         }
         
@@ -955,7 +1036,7 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
             color=discord.Color.green()
         )
         embed.add_field(name="⏰ Duración", value=readable_time, inline=True)
-        embed.add_field(name="🕒 Expira", value=f"<t:{int(expires_at.timestamp())}:R>", inline=True)
+        embed.add_field(name="🕒 Expira", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=True)
         embed.add_field(name="👤 Asignado por", value=interaction.user.mention, inline=True)
         
         await interaction.response.send_message(embed=embed)
@@ -969,7 +1050,7 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
             )
             user_embed.add_field(name="Rol", value=rol.name, inline=True)
             user_embed.add_field(name="Duración", value=readable_time, inline=True)
-            user_embed.add_field(name="Expira", value=f"<t:{int(expires_at.timestamp())}:R>", inline=False)
+            user_embed.add_field(name="Expira", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=False)
             user_embed.set_footer(text="Este rol se eliminará automáticamente cuando expire el tiempo")
             
             await usuario.send(embed=user_embed)
@@ -984,11 +1065,70 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
             "Usa formatos como: `1h`, `30m`, `2d`, `1h30m`",
             ephemeral=True
         )
+    except discord.Forbidden as e:
+        error_msg = (
+            f"❌ **Error de permisos:** No tengo permisos para asignar el rol {rol.mention}\n\n"
+            f"**Verifica que:**\n"
+            f"• Mi rol ({interaction.guild.me.top_role.name}) esté **POR ENCIMA** del rol {rol.name}\n"
+            f"• Tenga el permiso **'Gestionar Roles'** activado\n"
+            f"• El rol {rol.name} no esté marcado como **'Administrador'**"
+        )
+        await interaction.response.send_message(error_msg, ephemeral=True)
+        print(f"❌ Error de permisos al asignar rol: {e}")
     except Exception as e:
         await interaction.response.send_message(
             f"❌ Error al asignar el rol temporal: {str(e)}",
             ephemeral=True
         )
+        print(f"❌ Error inesperado en comando /rol: {e}")
+
+# NUEVO COMANDO: Ver roles temporales activos
+@bot.tree.command(name="roles-temporales", description="Muestra los roles temporales activos (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def show_temporary_roles(interaction: discord.Interaction):
+    """Muestra los roles temporales activos en el servidor"""
+    data = load_temporary_roles()
+    active_roles = []
+    
+    for role_key, role_data in data['active_roles'].items():
+        if role_data['guild_id'] == interaction.guild.id:
+            user = interaction.guild.get_member(role_data['user_id'])
+            role = interaction.guild.get_role(role_data['role_id'])
+            
+            if user and role:
+                expires_at = datetime.fromisoformat(role_data['expires_at'])
+                active_roles.append({
+                    'user': user,
+                    'role': role,
+                    'expires_at': expires_at,
+                    'assigned_by': interaction.guild.get_member(role_data['assigned_by'])
+                })
+    
+    if not active_roles:
+        await interaction.response.send_message("ℹ️ No hay roles temporales activos en este servidor.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="⏰ Roles Temporales Activos",
+        description=f"**{len(active_roles)}** roles temporales activos",
+        color=discord.Color.blue()
+    )
+    
+    for i, temp_role in enumerate(active_roles[:10]):  # Máximo 10 para evitar embeds muy largos
+        embed.add_field(
+            name=f"#{i+1} {temp_role['user'].display_name}",
+            value=(
+                f"**Rol:** {temp_role['role'].mention}\n"
+                f"**Expira:** <t:{int(temp_role['expires_at'].timestamp())}:R>\n"
+                f"**Asignado por:** {temp_role['assigned_by'].mention if temp_role['assigned_by'] else 'N/A'}"
+            ),
+            inline=False
+        )
+    
+    if len(active_roles) > 10:
+        embed.set_footer(text=f"Y {len(active_roles) - 10} roles más...")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # --- Comandos de Prefijo ---
 
