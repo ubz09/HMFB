@@ -30,10 +30,10 @@ try:
     VERIFICATION_EMOJI = os.environ.get('VERIFICATION_EMOJI', '✅')
     VERIFICATION_IMAGE_URL = os.environ.get('VERIFICATION_IMAGE_URL', '')
 except (KeyError, ValueError):
-    VERIFICATION_CHANNEL_ID = None
-    VERIFICATION_ROLE_ID = None
+    VERIFICATION_CHANNEL_ID =1444476201270771843
+    VERIFICATION_ROLE_ID =1444480681991471204
     VERIFICATION_EMOJI = '✅'
-    VERIFICATION_IMAGE_URL = ''
+    VERIFICATION_IMAGE_URL = 'https://media.discordapp.net/attachments/1444072962729840722/1444089581128384522/pe.webp?ex=692cc23a&is=692b70ba&hm=a019c6f38ca3b57dd320ae272bc23a741e5dd268175b03f2eb74e9eef8b4ced0&=&format=webp&width=300&height=300'
     print("❌ Configuración de verificación no encontrada")
 
 # --- Rutas de Archivos ---
