@@ -1087,7 +1087,7 @@ async def cuenta_command(interaction: discord.Interaction):
         )
         embed.add_field(name='📧 Correo | Email', value=f'`{account["gmail"]}`', inline=False)
         embed.add_field(name='🔒 Contraseña | Password', value=f'`{account["password"]}`', inline=False)
-        embed.set_footer(text='HMFB X | ⚠️ Algunas cuentas no funcionan porque las bloqueo Microsoft | ⚠️ Some accounts don't work because Microsoft blocked them.')
+        embed.set_footer(text='HMFB X | dsc.gg/hmfb')
         
         await interaction.user.send(embed=embed)
         
