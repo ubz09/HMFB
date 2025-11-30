@@ -10,6 +10,7 @@ from flask import Flask
 import random
 import string
 import re
+import asyncio
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
@@ -30,8 +31,8 @@ try:
     VERIFICATION_EMOJI = os.environ.get('VERIFICATION_EMOJI', '✅')
     VERIFICATION_IMAGE_URL = os.environ.get('VERIFICATION_IMAGE_URL', '')
 except (KeyError, ValueError):
-    VERIFICATION_CHANNEL_ID =1444476201270771843
-    VERIFICATION_ROLE_ID =1444480681991471204
+    VERIFICATION_CHANNEL_ID = 1444476201270771843
+    VERIFICATION_ROLE_ID = 1444480681991471204
     VERIFICATION_EMOJI = '✅'
     VERIFICATION_IMAGE_URL = 'https://media.discordapp.net/attachments/1444072962729840722/1444089581128384522/pe.webp?ex=692cc23a&is=692b70ba&hm=a019c6f38ca3b57dd320ae272bc23a741e5dd268175b03f2eb74e9eef8b4ced0&=&format=webp&width=300&height=300'
     print("❌ Configuración de verificación no encontrada")
@@ -41,21 +42,21 @@ DATA_DIR = 'data'
 ACCOUNTS_FILE = os.path.join(DATA_DIR, 'accounts.json')
 LOGS_FILE = os.path.join(DATA_DIR, 'logs.txt')
 KEYS_FILE = os.path.join(DATA_DIR, 'keys.json')
-TEMPORARY_ROLES_FILE = os.path.join(DATA_DIR, 'temporary_roles.json')
+INVITES_FILE = os.path.join(DATA_DIR, 'invites.json')
 
 # Asegurarse de que las carpetas y archivos existan
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-for file_path in [ACCOUNTS_FILE, LOGS_FILE, KEYS_FILE, TEMPORARY_ROLES_FILE]:
+for file_path in [ACCOUNTS_FILE, LOGS_FILE, KEYS_FILE, INVITES_FILE]:
     if not os.path.exists(file_path):
         if file_path.endswith('.json'):
             if file_path == KEYS_FILE:
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump({'keys': {}, 'users_with_access': []}, f, indent=4)
-            elif file_path == TEMPORARY_ROLES_FILE:
+            elif file_path == INVITES_FILE:
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump({'active_roles': {}}, f, indent=4)
+                    json.dump({'invites': {}, 'join_events': {}, 'user_invites': {}}, f, indent=4)
             else:
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump({'available': [], 'distributed': []}, f, indent=4)
@@ -68,6 +69,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
 intents.members = True
+intents.invites = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Cargar los datos de las cuentas al iniciar
@@ -76,6 +78,22 @@ registered_emails = set()
 keys_data = {'keys': {}, 'users_with_access': []}
 
 # --- Funciones Auxiliares ---
+
+def load_invites_data():
+    """Carga los datos de invitaciones desde el archivo JSON."""
+    try:
+        with open(INVITES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {'invites': {}, 'join_events': {}, 'user_invites': {}}
+
+def save_invites_data(data):
+    """Guarda los datos de invitaciones en el archivo JSON."""
+    try:
+        with open(INVITES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error guardando datos de invitaciones: {e}")
 
 def load_accounts():
     """Carga los datos de las cuentas desde el archivo JSON y actualiza el conjunto de emails registrados."""
@@ -124,44 +142,6 @@ def save_keys():
             json.dump(keys_data, f, indent=4)
     except Exception as e:
         print(f"Error guardando keys: {e}")
-
-def load_temporary_roles():
-    """Carga los roles temporales activos desde el archivo JSON."""
-    try:
-        with open(TEMPORARY_ROLES_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return {'active_roles': {}}
-
-def save_temporary_roles(data):
-    """Guarda los roles temporales en el archivo JSON."""
-    try:
-        with open(TEMPORARY_ROLES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"Error guardando roles temporales: {e}")
-
-async def remove_temporary_role(guild, user_id, role_id):
-    """Elimina un rol temporal de un usuario."""
-    try:
-        member = guild.get_member(user_id)
-        role = guild.get_role(role_id)
-        
-        if member and role:
-            # Verificar que el bot puede gestionar el rol
-            if role.position >= guild.me.top_role.position:
-                print(f"⚠️ No puedo eliminar el rol {role.name} - está por encima de mi rol")
-                return False
-            
-            await member.remove_roles(role)
-            print(f"🔹 Rol temporal removido: {role.name} de {member.display_name}")
-            return True
-        else:
-            print(f"⚠️ Miembro o rol no encontrado al intentar remover: user_id={user_id}, role_id={role_id}")
-            return False
-    except Exception as e:
-        print(f"Error removiendo rol temporal: {e}")
-    return False
 
 def update_log(account_info, status):
     """Añade una entrada al archivo de registro (log)."""
@@ -254,52 +234,100 @@ def parse_time_string(time_str):
     readable_time = ", ".join(time_parts)
     return total_seconds, readable_time
 
+# --- Sistema de Tracking de Invitaciones ---
+
+def analyze_user_invites(invites_data, user_id, guild):
+    """Analiza las invitaciones de un usuario y las categoriza."""
+    user_id_str = str(user_id)
+    
+    if user_id_str not in invites_data['user_invites']:
+        return None
+    
+    user_invites = invites_data['user_invites'][user_id_str]
+    total_invites = len(user_invites)
+    
+    # Categorías
+    valid_invites = []
+    fake_invites = []
+    left_invites = []
+    j4j_invites = []
+    alt_invites = []
+    
+    FAKE_THRESHOLD = 5 * 60  # 5 minutos en segundos
+    
+    for invited_user_id, invite_data in user_invites.items():
+        invited_user = guild.get_member(int(invited_user_id))
+        join_time = datetime.fromisoformat(invite_data['joined_at'])
+        
+        # Verificar si es fake (se fue en menos de 5 minutos)
+        if invite_data.get('left_at'):
+            left_time = datetime.fromisoformat(invite_data['left_at'])
+            time_in_server = (left_time - join_time).total_seconds()
+            if time_in_server < FAKE_THRESHOLD:
+                fake_invites.append({
+                    'user_id': invited_user_id,
+                    'username': invite_data['username'],
+                    'time_in_server': time_in_server
+                })
+                continue
+        
+        # Verificar si se fue (left)
+        if invite_data.get('left_at'):
+            left_invites.append({
+                'user_id': invited_user_id,
+                'username': invite_data['username'],
+                'joined_at': invite_data['joined_at'],
+                'left_at': invite_data['left_at']
+            })
+            continue
+        
+        # Verificar si está actualmente en el servidor
+        if invited_user:
+            # Verificar posibles alts (cuenta muy nueva)
+            account_age = (join_time - datetime.fromisoformat(invite_data.get('account_created', join_time.isoformat()))).days
+            if account_age < 7:  # Cuenta creada hace menos de 7 días
+                alt_invites.append({
+                    'user_id': invited_user_id,
+                    'username': invite_data['username'],
+                    'account_age': account_age
+                })
+                continue
+            
+            # Verificar patrones j4j (mismo usuario invitando mutuamente en corto tiempo)
+            mutual_invites = 0
+            if str(invited_user_id) in invites_data['user_invites']:
+                mutual_invites = len([uid for uid in invites_data['user_invites'][str(invited_user_id)] 
+                                    if uid == user_id_str])
+            
+            if mutual_invites > 0:
+                j4j_invites.append({
+                    'user_id': invited_user_id,
+                    'username': invite_data['username'],
+                    'mutual_invites': mutual_invites
+                })
+                continue
+            
+            # Invitación válida
+            valid_invites.append({
+                'user_id': invited_user_id,
+                'username': invite_data['username'],
+                'joined_at': invite_data['joined_at']
+            })
+    
+    return {
+        'total': total_invites,
+        'valid': valid_invites,
+        'fake': fake_invites,
+        'left': left_invites,
+        'j4j': j4j_invites,
+        'alt': alt_invites
+    }
+
 # *** Tarea para limpiar keys expiradas periódicamente ***
 @tasks.loop(hours=1)
 async def clean_keys_task():
     """Limpia keys expiradas cada hora."""
     clean_expired_keys()
-
-# *** Tarea para verificar roles temporales ***
-@tasks.loop(minutes=1)
-async def check_temporary_roles():
-    """Verifica y elimina roles temporales expirados."""
-    await bot.wait_until_ready()
-    
-    try:
-        data = load_temporary_roles()
-        now = datetime.now()
-        roles_to_remove = []
-        
-        for role_data_key, role_data in data['active_roles'].items():
-            expires_at = datetime.fromisoformat(role_data['expires_at'])
-            
-            if now > expires_at:
-                guild = bot.get_guild(role_data['guild_id'])
-                if guild:
-                    success = await remove_temporary_role(
-                        guild, 
-                        role_data['user_id'], 
-                        role_data['role_id']
-                    )
-                    if success:
-                        roles_to_remove.append(role_data_key)
-                    else:
-                        print(f"⚠️ No se pudo eliminar rol temporal: {role_data_key}")
-                else:
-                    print(f"⚠️ Servidor no encontrado para rol temporal: {role_data_key}")
-                    roles_to_remove.append(role_data_key)  # Limpiar si el servidor no existe
-        
-        # Eliminar roles expirados del archivo
-        for role_key in roles_to_remove:
-            del data['active_roles'][role_key]
-        
-        if roles_to_remove:
-            save_temporary_roles(data)
-            print(f"🗑️ Eliminados {len(roles_to_remove)} roles temporales expirados")
-            
-    except Exception as e:
-        print(f"Error en check_temporary_roles: {e}")
 
 # *** VIEWS MEJORADAS PARA BORRAR TICKETS ***
 class ConfirmDeleteView(discord.ui.View):
@@ -581,11 +609,10 @@ async def on_ready():
     
     distribute_account.start()
     clean_keys_task.start()
-    check_temporary_roles.start()  # NUEVA TASK
     
-    # Cargar roles temporales activos al iniciar
-    data = load_temporary_roles()
-    print(f"🔹 {len(data['active_roles'])} roles temporales activos cargados")
+    # Cargar datos de invitaciones al iniciar
+    invites_data = load_invites_data()
+    print(f"🔹 Sistema de invitaciones cargado: {len(invites_data['user_invites'])} usuarios con invitaciones registradas")
 
 @tasks.loop(minutes=DISTRIBUTION_INTERVAL_MINUTES)
 async def distribute_account():
@@ -798,6 +825,74 @@ async def on_raw_reaction_add(payload):
         except Exception as e:
             print(f"❌ Error en verificación automática: {e}")
 
+# NUEVO EVENTO: Tracking de invitaciones
+@bot.event
+async def on_member_join(member):
+    """Registra cuando un usuario se une al servidor"""
+    try:
+        invites_data = load_invites_data()
+        
+        # Obtener todas las invitaciones del servidor
+        invites = await member.guild.invites()
+        
+        # Buscar qué invitación fue usada
+        for invite in invites:
+            if invite.uses > invites_data['invites'].get(str(invite.id), {}).get('uses', 0):
+                # Esta es la invitación usada
+                inviter_id = str(invite.inviter.id) if invite.inviter else 'unknown'
+                invited_id = str(member.id)
+                
+                # Registrar en user_invites
+                if inviter_id not in invites_data['user_invites']:
+                    invites_data['user_invites'][inviter_id] = {}
+                
+                invites_data['user_invites'][inviter_id][invited_id] = {
+                    'username': member.name,
+                    'joined_at': datetime.now().isoformat(),
+                    'invite_code': invite.code,
+                    'account_created': member.created_at.isoformat()
+                }
+                
+                # Registrar en join_events
+                invites_data['join_events'][invited_id] = {
+                    'inviter_id': inviter_id,
+                    'invite_code': invite.code,
+                    'joined_at': datetime.now().isoformat()
+                }
+                
+                # Actualizar contador de uses
+                if str(invite.id) not in invites_data['invites']:
+                    invites_data['invites'][str(invite.id)] = {}
+                
+                invites_data['invites'][str(invite.id)]['uses'] = invite.uses
+                invites_data['invites'][str(invite.id)]['inviter_id'] = inviter_id
+                invites_data['invites'][str(invite.id)]['code'] = invite.code
+                
+                save_invites_data(invites_data)
+                print(f"📥 Usuario {member.name} se unió mediante invitación de {invite.inviter.name if invite.inviter else 'unknown'}")
+                break
+        
+    except Exception as e:
+        print(f"❌ Error en on_member_join: {e}")
+
+@bot.event
+async def on_member_remove(member):
+    """Registra cuando un usuario abandona el servidor"""
+    try:
+        invites_data = load_invites_data()
+        user_id = str(member.id)
+        
+        # Marcar como left en todas las invitaciones donde aparezca
+        for inviter_id, user_invites in invites_data['user_invites'].items():
+            if user_id in user_invites:
+                invites_data['user_invites'][inviter_id][user_id]['left_at'] = datetime.now().isoformat()
+        
+        save_invites_data(invites_data)
+        print(f"📤 Usuario {member.name} abandonó el servidor")
+        
+    except Exception as e:
+        print(f"❌ Error en on_member_remove: {e}")
+
 # --- Comandos de Barra ---
 
 @bot.tree.command(name="get-key", description="Solicitar una key de acceso a las cuentas")
@@ -969,7 +1064,7 @@ async def cuenta_command(interaction: discord.Interaction):
         )
         embed.add_field(name='📧 Correo | Email', value=f'`{account["gmail"]}`', inline=False)
         embed.add_field(name='🔒 Contraseña | Password', value=f'`{account["password"]}`', inline=False)
-        embed.set_footer(text='HMFB X | ¡Disfruta tu cuenta! | Enjoy your account!')
+        embed.set_footer(text='HMFB X |:warning: No todas las cuentas funcionan (Algunas son bloqueadas por Microsoft)')
         
         await interaction.user.send(embed=embed)
         
@@ -1086,219 +1181,180 @@ async def verify_setup(interaction: discord.Interaction):
         error_embed.set_footer(text="HMFB X")
         await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
-# NUEVO COMANDO: Sistema de roles temporales BILINGÜE
-@bot.tree.command(name="rol", description="Asigna un rol temporal a un usuario (Admin)")
+# NUEVO COMANDO: Sistema de invitaciones
+@bot.tree.command(name="invites", description="Analiza las invitaciones de un usuario")
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(
-    usuario="Usuario al que asignar el rol",
-    rol="Rol a asignar",
-    tiempo="Duración del rol (ej: 1h, 30m, 2d, 1h30m)"
+    usuario="Usuario a analizar (deja vacío para analizarte a ti mismo)"
 )
-async def temporary_role(interaction: discord.Interaction, usuario: discord.Member, rol: discord.Role, tiempo: str):
-    """Asigna un rol temporal a un usuario - VERSIÓN BILINGÜE"""
-    try:
-        # Verificar que el bot puede gestionar el rol
-        bot_member = interaction.guild.me
-        if rol.position >= bot_member.top_role.position:
-            embed = discord.Embed(
-                title="❌ Error de Permisos | Permission Error",
-                description=(
-                    f"No puedo asignar el rol **{rol.name}** porque está por encima o igual a mi rol más alto ({bot_member.top_role.name}).\n"
-                    f"**Solución | Solution:** Mueve mi rol ({bot_member.top_role.name}) por encima del rol {rol.name} en la configuración del servidor. | Move my role ({bot_member.top_role.name}) above the {rol.name} role in server settings."
-                ),
-                color=discord.Color.red()
-            )
-            embed.set_footer(text="HMFB X")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        
-        # Verificar que el usuario que ejecuta el comando puede asignar el rol
-        if rol.position >= interaction.user.top_role.position and interaction.user != interaction.guild.owner:
-            embed = discord.Embed(
-                title="❌ Error de Permisos | Permission Error",
-                description=f"No puedes asignar el rol **{rol.name}** porque está por encima o igual a tu rol más alto. | You cannot assign the **{rol.name}** role because it is above or equal to your highest role.",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text="HMFB X")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        
-        # Verificar que no se asigne a bots
-        if usuario.bot:
-            embed = discord.Embed(
-                title="❌ Error | Error",
-                description="No puedes asignar roles temporales a bots. | You cannot assign temporary roles to bots.",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text="HMFB X")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        
-        # Parsear el tiempo
-        total_seconds, readable_time = parse_time_string(tiempo)
-        
-        if total_seconds <= 0:
-            embed = discord.Embed(
-                title="❌ Tiempo Inválido | Invalid Time",
-                description="El tiempo debe ser mayor a 0. Usa formatos como: 1h, 30m, 2d, 1h30m | Time must be greater than 0. Use formats like: 1h, 30m, 2d, 1h30m",
-                color=discord.Color.red()
-            )
-            embed.set_footer(text="HMFB X")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        
-        # Verificar si el usuario ya tiene el rol
-        if rol in usuario.roles:
-            embed = discord.Embed(
-                title="ℹ️ Información | Information",
-                description=f"El usuario {usuario.mention} ya tiene el rol {rol.mention}. | The user {usuario.mention} already has the {rol.mention} role.",
-                color=discord.Color.blue()
-            )
-            embed.set_footer(text="HMFB X")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        
-        # Asignar el rol
-        await usuario.add_roles(rol)
-        
-        # Guardar en el archivo de roles temporales
-        data = load_temporary_roles()
-        
-        role_key = f"{usuario.id}_{rol.id}_{interaction.guild.id}"
-        data['active_roles'][role_key] = {
-            'user_id': usuario.id,
-            'role_id': rol.id,
-            'guild_id': interaction.guild.id,
-            'assigned_by': interaction.user.id,
-            'assigned_at': datetime.now().isoformat(),
-            'expires_at': (datetime.now() + timedelta(seconds=total_seconds)).isoformat(),
-            'duration': readable_time
-        }
-        
-        save_temporary_roles(data)
-        
-        # Crear embed de confirmación BILINGÜE
-        embed = discord.Embed(
-            title="✅ Rol Temporal Asignado | Temporary Role Assigned",
-            description=f"Se ha asignado el rol {rol.mention} a {usuario.mention} | The role {rol.mention} has been assigned to {usuario.mention}",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="⏰ Duración | Duration", value=readable_time, inline=True)
-        embed.add_field(name="🕒 Expira | Expires", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=True)
-        embed.add_field(name="👤 Asignado por | Assigned by", value=interaction.user.mention, inline=True)
-        embed.set_footer(text="HMFB X")
-        
-        await interaction.response.send_message(embed=embed)
-        
-        # Enviar DM al usuario (opcional) - BILINGÜE
-        try:
-            user_embed = discord.Embed(
-                title="🎭 Rol Temporal Asignado | Temporary Role Assigned",
-                description=f"Has recibido un rol temporal en **{interaction.guild.name}** | You have received a temporary role in **{interaction.guild.name}**",
-                color=rol.color
-            )
-            user_embed.add_field(name="🎯 Rol | Role", value=rol.name, inline=True)
-            user_embed.add_field(name="⏱️ Duración | Duration", value=readable_time, inline=True)
-            user_embed.add_field(name="🕒 Expira | Expires", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=False)
-            user_embed.set_footer(text="HMFB X | Este rol se eliminará automáticamente cuando expire el tiempo | This role will be automatically removed when the time expires")
-            
-            await usuario.send(embed=user_embed)
-        except:
-            pass  # No se pudo enviar DM, no es crítico
-        
-        print(f"🔹 Rol temporal asignado: {rol.name} a {usuario.name} por {interaction.user.name}")
-        
-    except ValueError as e:
-        embed = discord.Embed(
-            title="❌ Formato de Tiempo Inválido | Invalid Time Format",
-            description=(
-                f"Formato de tiempo inválido: {str(e)}\n"
-                "Usa formatos como: `1h`, `30m`, `2d`, `1h30m` | Use formats like: `1h`, `30m`, `2d`, `1h30m`"
-            ),
-            color=discord.Color.red()
-        )
-        embed.set_footer(text="HMFB X")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    except discord.Forbidden as e:
-        embed = discord.Embed(
-            title="❌ Error de Permisos | Permission Error",
-            description=(
-                f"**Error de permisos:** No tengo permisos para asignar el rol {rol.mention}\n\n"
-                f"**Verifica que | Check that:**\n"
-                f"• Mi rol ({interaction.guild.me.top_role.name}) esté **POR ENCIMA** del rol {rol.name} | My role ({interaction.guild.me.top_role.name}) is **ABOVE** the {rol.name} role\n"
-                f"• Tenga el permiso **'Gestionar Roles'** activado | I have the **'Manage Roles'** permission enabled\n"
-                f"• El rol {rol.name} no esté marcado como **'Administrador'** | The {rol.name} role is not marked as **'Administrator'**"
-            ),
-            color=discord.Color.red()
-        )
-        embed.set_footer(text="HMFB X")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        print(f"❌ Error de permisos al asignar rol: {e}")
-    except Exception as e:
-        embed = discord.Embed(
-            title="❌ Error | Error",
-            description=f"Error al asignar el rol temporal: {str(e)} | Error assigning temporary role: {str(e)}",
-            color=discord.Color.red()
-        )
-        embed.set_footer(text="HMFB X")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        print(f"❌ Error inesperado en comando /rol: {e}")
-
-# NUEVO COMANDO: Ver roles temporales activos BILINGÜE
-@bot.tree.command(name="roles-temporales", description="Muestra los roles temporales activos (Admin)")
-@app_commands.checks.has_permissions(administrator=True)
-async def show_temporary_roles(interaction: discord.Interaction):
-    """Muestra los roles temporales activos en el servidor - VERSIÓN BILINGÜE"""
-    data = load_temporary_roles()
-    active_roles = []
+async def invites_command(interaction: discord.Interaction, usuario: discord.Member = None):
+    """Analiza las invitaciones de un usuario - VERSIÓN BILINGÜE"""
+    target_user = usuario or interaction.user
+    invites_data = load_invites_data()
     
-    for role_key, role_data in data['active_roles'].items():
-        if role_data['guild_id'] == interaction.guild.id:
-            user = interaction.guild.get_member(role_data['user_id'])
-            role = interaction.guild.get_role(role_data['role_id'])
-            
-            if user and role:
-                expires_at = datetime.fromisoformat(role_data['expires_at'])
-                active_roles.append({
-                    'user': user,
-                    'role': role,
-                    'expires_at': expires_at,
-                    'assigned_by': interaction.guild.get_member(role_data['assigned_by'])
-                })
+    analysis = analyze_user_invites(invites_data, target_user.id, interaction.guild)
     
-    if not active_roles:
+    if not analysis:
         embed = discord.Embed(
-            title="ℹ️ Sin Roles Temporales | No Temporary Roles",
-            description="No hay roles temporales activos en este servidor. | There are no active temporary roles in this server.",
+            title="📊 Análisis de Invitaciones | Invites Analysis",
+            description=(
+                f"**{target_user.mention} no tiene invitaciones registradas.**\n"
+                f"**{target_user.mention} has no registered invites.**"
+            ),
             color=discord.Color.blue()
         )
         embed.set_footer(text="HMFB X")
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
+    # Calcular porcentajes
+    total = analysis['total']
+    valid_count = len(analysis['valid'])
+    fake_count = len(analysis['fake'])
+    left_count = len(analysis['left'])
+    j4j_count = len(analysis['j4j'])
+    alt_count = len(analysis['alt'])
+    
+    legit_count = valid_count
+    fraud_count = fake_count + left_count + j4j_count + alt_count
+    
+    legit_percentage = (legit_count / total * 100) if total > 0 else 0
+    fraud_percentage = (fraud_count / total * 100) if total > 0 else 0
+    
+    # Crear embed de análisis BILINGÜE
     embed = discord.Embed(
-        title="⏰ Roles Temporales Activos | Active Temporary Roles",
-        description=f"**{len(active_roles)}** roles temporales activos | **{len(active_roles)}** active temporary roles",
+        title=f"📊 Análisis de Invitaciones | Invites Analysis - {target_user.display_name}",
         color=discord.Color.blue()
     )
     
-    for i, temp_role in enumerate(active_roles[:10]):  # Máximo 10 para evitar embeds muy largos
-        embed.add_field(
-            name=f"#{i+1} {temp_role['user'].display_name}",
-            value=(
-                f"**🎯 Rol | Role:** {temp_role['role'].mention}\n"
-                f"**🕒 Expira | Expires:** <t:{int(temp_role['expires_at'].timestamp())}:R>\n"
-                f"**👤 Asignado por | Assigned by:** {temp_role['assigned_by'].mention if temp_role['assigned_by'] else 'N/A'}"
-            ),
-            inline=False
-        )
+    # Estadísticas generales
+    embed.add_field(
+        name="📈 Estadísticas Generales | General Statistics",
+        value=(
+            f"**Total de Invitaciones | Total Invites:** {total}\n"
+            f"**Legítimas | Legitimate:** {legit_count} ({legit_percentage:.1f}%)\n"
+            f"**Fraudulentas | Fraudulent:** {fraud_count} ({fraud_percentage:.1f}%)"
+        ),
+        inline=False
+    )
     
-    if len(active_roles) > 10:
-        embed.set_footer(text=f"HMFB X | Y {len(active_roles) - 10} roles más... | And {len(active_roles) - 10} more roles...")
-    else:
-        embed.set_footer(text="HMFB X")
+    # Desglose por categorías
+    breakdown_text = (
+        f"✅ **Válidas | Valid:** {valid_count}\n"
+        f"❌ **Fake (<5min):** {fake_count}\n"
+        f"🚪 **Lefts | Abandonaron:** {left_count}\n"
+        f"🔄 **J4J | Join-for-Join:** {j4j_count}\n"
+        f"👥 **Alts | Cuentas Alternas:** {alt_count}"
+    )
+    
+    embed.add_field(
+        name="🔍 Desglose por Categoría | Category Breakdown",
+        value=breakdown_text,
+        inline=False
+    )
+    
+    # Evaluación de calidad
+    quality_emoji = "🟢" if legit_percentage >= 70 else "🟡" if legit_percentage >= 40 else "🔴"
+    quality_text = "Excelente | Excellent" if legit_percentage >= 70 else "Regular | Average" if legit_percentage >= 40 else "Pobre | Poor"
+    
+    embed.add_field(
+        name="🏆 Evaluación de Calidad | Quality Assessment",
+        value=f"{quality_emoji} **{quality_text}** - {legit_percentage:.1f}% legítimas | legitimate",
+        inline=False
+    )
+    
+    # Información adicional si hay problemas
+    if fraud_count > legit_count:
+        advice = (
+            "⚠️ **Alerta | Alert:** Más del 50% de las invitaciones son sospechosas.\n"
+            "**Recomendación | Recommendation:** Revisar este usuario para posible spam."
+        )
+        embed.add_field(name="🚨 Recomendación | Recommendation", value=advice, inline=False)
+    
+    embed.set_footer(text=f"HMFB X | Análisis generado | Analysis generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# NUEVO COMANDO: Resetear invitaciones
+@bot.tree.command(name="reset-invites", description="Resetea todas las estadísticas de invitaciones (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def reset_invites_command(interaction: discord.Interaction):
+    """Resetea todas las estadísticas de invitaciones a cero - VERSIÓN BILINGÜE"""
+    
+    # Crear embed de confirmación
+    confirm_embed = discord.Embed(
+        title="⚠️ Confirmar Reset de Invitaciones | Confirm Invites Reset",
+        description=(
+            "**¿Estás seguro de que quieres resetear TODAS las estadísticas de invitaciones?**\n"
+            "**Are you sure you want to reset ALL invite statistics?**\n\n"
+            "🗑️ **Esto eliminará:** | **This will delete:**\n"
+            "• Todas las invitaciones registradas | All registered invites\n"
+            "• Historial de joins/leaves | Join/leave history\n"
+            "• Estadísticas de todos los usuarios | All users' statistics\n\n"
+            "**Esta acción NO se puede deshacer.** | **This action CANNOT be undone.**"
+        ),
+        color=discord.Color.orange()
+    )
+    confirm_embed.set_footer(text="HMFB X")
+    
+    # Crear vista de confirmación
+    class ResetConfirmView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+        
+        @discord.ui.button(label='✅ Sí, Resetear Todo', style=discord.ButtonStyle.danger)
+        async def confirm_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message('❌ Solo los administradores pueden usar este botón.', ephemeral=True)
+                return
+            
+            # Resetear todos los datos de invitaciones
+            reset_data = {'invites': {}, 'join_events': {}, 'user_invites': {}}
+            save_invites_data(reset_data)
+            
+            success_embed = discord.Embed(
+                title="✅ Invitaciones Reseteadas | Invites Reset",
+                description=(
+                    "**Todas las estadísticas de invitaciones han sido reseteadas correctamente.**\n"
+                    "**All invite statistics have been successfully reset.**\n\n"
+                    "📊 **Nuevo estado | New status:**\n"
+                    "• Invitaciones registradas: 0 | Registered invites: 0\n"
+                    "• Usuarios con invitaciones: 0 | Users with invites: 0\n"
+                    "• Eventos de join: 0 | Join events: 0"
+                ),
+                color=discord.Color.green()
+            )
+            success_embed.set_footer(text="HMFB X")
+            
+            # Deshabilitar botones
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+            
+            await interaction.response.send_message(embed=success_embed, ephemeral=True)
+            print(f"🔄 Invitaciones reseteadas por {interaction.user.name}")
+        
+        @discord.ui.button(label='❌ Cancelar', style=discord.ButtonStyle.secondary)
+        async def cancel_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message('❌ Solo los administradores pueden usar este botón.', ephemeral=True)
+                return
+            
+            cancel_embed = discord.Embed(
+                title="✅ Reset Cancelado | Reset Cancelled",
+                description="El reset de invitaciones ha sido cancelado. | The invites reset has been cancelled.",
+                color=discord.Color.blue()
+            )
+            cancel_embed.set_footer(text="HMFB X")
+            
+            # Deshabilitar botones
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(view=self)
+            
+            await interaction.response.send_message(embed=cancel_embed, ephemeral=True)
+    
+    await interaction.response.send_message(embed=confirm_embed, view=ResetConfirmView(), ephemeral=True)
 
 # --- Comandos de Prefijo ---
 
