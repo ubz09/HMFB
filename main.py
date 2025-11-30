@@ -596,24 +596,39 @@ async def on_ready():
     load_accounts()
     load_keys()
     
-    # *** NUEVO: Registrar las Views persistentes ***
+    # *** Registrar las Views persistentes ***
     bot.add_view(TicketView())
     bot.add_view(KeyRequestView(0, "", ""))  # View base para solicitudes
     
     try:
-        # Limpiar comandos globales primero
-        bot.tree.clear_commands(guild=None)
+        print("🔄 Iniciando sincronización de comandos...")
         
-        # Sincronizar comandos
+        # OBTENER COMANDOS ANTES DE SINCRONIZAR PARA DIAGNÓSTICO
+        commands_before = bot.tree.get_commands()
+        print(f"📝 Comandos en el árbol ANTES de sincronizar: {len(commands_before)}")
+        
+        for cmd in commands_before:
+            print(f"   - /{cmd.name}: {cmd.description}")
+        
+        # SINCRONIZAR COMANDOS (sin limpiar primero)
         synced = await bot.tree.sync()
-        print(f"✅ Sincronizados {len(synced)} comandos de barra")
+        print(f"✅ Sincronizados {len(synced)} comandos globales")
         
-        # Listar comandos disponibles
-        commands_list = [command.name for command in bot.tree.get_commands()]
-        print(f"📝 Comandos disponibles: {', '.join(commands_list)}")
+        # VERIFICAR COMANDOS DESPUÉS DE SINCRONIZAR
+        commands_after = bot.tree.get_commands()
+        print(f"📝 Comandos en el árbol DESPUÉS de sincronizar: {len(commands_after)}")
         
+        if commands_after:
+            for cmd in commands_after:
+                print(f"   - /{cmd.name}: {cmd.description}")
+        else:
+            print("❌ ¡CRÍTICO! No hay comandos registrados después de la sincronización")
+            print("💡 Solución: Reiniciar el bot completamente")
+            
     except Exception as e:
         print(f"❌ Error sincronizando comandos: {e}")
+        import traceback
+        traceback.print_exc()
     
     distribute_account.start()
     clean_keys_task.start()
@@ -801,7 +816,7 @@ async def on_raw_reaction_add(payload):
                         f"**¡Te has verificado correctamente en {guild.name}!**\n\n"
                         "✅ **¡Bienvenido/a!** Ahora tienes acceso a todos los canales del servidor.\n"
                         "🔓 **Acceso completo** a todas las áreas de la comunidad.\n"
-                        "👥 **Puedes interactuar** con otros miembros libremente.\n\n"
+                        "👥 **Puedes interactuar** con other members freely.\n\n"
                         "¡Disfruta de tu estancia en nuestra comunidad!"
                     ),
                     inline=False
@@ -1519,44 +1534,119 @@ async def add_account_error(ctx,error):
         embed.set_footer(text="HMFB X")
         await ctx.send(embed=embed)
 
-# --- Comando Sync ---
+# --- Comando Sync Mejorado ---
 @bot.command(name='sync')
 @commands.has_permissions(administrator=True)
 async def sync_commands(ctx):
+    """Comando mejorado para sincronizar comandos"""
     try:
-        # Limpiar comandos globales primero
-        bot.tree.clear_commands(guild=None)
+        # Mensaje de inicio
+        embed_loading = discord.Embed(
+            title="🔄 Sincronizando Comandos...",
+            description="Esto puede tomar hasta 1 hora en propagarse globalmente",
+            color=discord.Color.orange()
+        )
+        loading_msg = await ctx.send(embed=embed_loading)
         
-        # Sincronizar comandos
+        # DIAGNÓSTICO ANTES
+        commands_before = bot.tree.get_commands()
+        
+        # SINCRONIZAR
         synced = await bot.tree.sync()
         
+        # DIAGNÓSTICO DESPUÉS
+        commands_after = bot.tree.get_commands()
+        
+        # EMBED DE RESULTADO
         embed = discord.Embed(
             title="✅ Comandos Sincronizados | Commands Synced",
-            description=f"Sincronizados {len(synced)} comandos de barra | Synced {len(synced)} slash commands",
             color=discord.Color.green()
         )
         
-        # Listar comandos sincronizados
-        commands_list = [command.name for command in bot.tree.get_commands()]
         embed.add_field(
-            name="📝 Comandos Disponibles | Available Commands",
-            value=", ".join([f"`/{cmd}`" for cmd in commands_list]),
+            name="📊 Estadísticas | Statistics",
+            value=(
+                f"**Comandos sincronizados:** {len(synced)}\n"
+                f"**Comandos en árbol:** {len(commands_after)}\n"
+                f"**Tiempo de propagación:** 1-60 minutos"
+            ),
+            inline=False
+        )
+        
+        # LISTA DE COMANDOS
+        if commands_after:
+            command_list = "\n".join([f"• `/{cmd.name}` - {cmd.description}" for cmd in commands_after])
+            embed.add_field(
+                name="📝 Comandos Disponibles | Available Commands",
+                value=command_list,
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="❌ Advertencia | Warning",
+                value="No se detectaron comandos. Esto es normal - pueden tardar en aparecer.",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="💡 Nota Importante | Important Note",
+            value=(
+                "Los comandos pueden tardar **hasta 1 hora** en aparecer para todos los usuarios.\n"
+                "Si no ves los comandos, espera o reinvita al bot con el scope `applications.commands`"
+            ),
             inline=False
         )
         
         embed.set_footer(text="HMFB X")
-        await ctx.send(embed=embed)
-        print(f"Comandos sincronizados: {len(synced)}")
-        print(f"Comandos disponibles: {', '.join(commands_list)}")
+        
+        await loading_msg.edit(embed=embed)
+        
+        # LOG EN CONSOLA
+        print(f"🔧 Sincronización manual ejecutada por {ctx.author.name}")
+        print(f"📊 Comandos sincronizados: {len(synced)}")
+        print("📝 Lista de comandos:")
+        for cmd in commands_after:
+            print(f"   - /{cmd.name}")
+            
     except Exception as e:
         embed = discord.Embed(
             title="❌ Error de Sincronización | Sync Error",
-            description=f"Error sincronizando comandos: {e} | Error syncing commands: {e}",
+            description=f"**Error:** {str(e)}\n\nLos comandos pueden aparecer automáticamente en unos minutos.",
             color=discord.Color.red()
         )
         embed.set_footer(text="HMFB X")
         await ctx.send(embed=embed)
-        print(f"Error sincronizando: {e}")
+        print(f"❌ Error en sync: {e}")
+
+# --- Comando de Emergencia ---
+@bot.command(name='force-cmds')
+@commands.has_permissions(administrator=True)
+async def force_commands(ctx):
+    """Comando de emergencia para forzar comandos"""
+    try:
+        # Sincronizar con servidor específico
+        guild_synced = await bot.tree.sync(guild=ctx.guild)
+        
+        embed = discord.Embed(
+            title="⚡ Comandos Forzados",
+            description=f"Sincronizados {len(guild_synced)} comandos en este servidor",
+            color=discord.Color.blue()
+        )
+        
+        # Listar comandos forzados
+        commands_list = bot.tree.get_commands(guild=ctx.guild)
+        if commands_list:
+            cmd_names = [f"`/{cmd.name}`" for cmd in commands_list]
+            embed.add_field(
+                name="📝 Comandos en este servidor",
+                value=", ".join(cmd_names),
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error: {e}")
 
 # --- Keep Alive ---
 app = Flask('')
