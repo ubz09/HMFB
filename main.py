@@ -10,7 +10,6 @@ from flask import Flask
 import random
 import string
 import re
-import asyncio
 
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
@@ -602,8 +601,17 @@ async def on_ready():
     bot.add_view(KeyRequestView(0, "", ""))  # View base para solicitudes
     
     try:
+        # Limpiar comandos globales primero
+        bot.tree.clear_commands(guild=None)
+        
+        # Sincronizar comandos
         synced = await bot.tree.sync()
         print(f"✅ Sincronizados {len(synced)} comandos de barra")
+        
+        # Listar comandos disponibles
+        commands_list = [command.name for command in bot.tree.get_commands()]
+        print(f"📝 Comandos disponibles: {', '.join(commands_list)}")
+        
     except Exception as e:
         print(f"❌ Error sincronizando comandos: {e}")
     
@@ -893,7 +901,7 @@ async def on_member_remove(member):
     except Exception as e:
         print(f"❌ Error en on_member_remove: {e}")
 
-# --- Comandos de Barra ---
+# --- COMANDOS DE BARRA ---
 
 @bot.tree.command(name="get-key", description="Solicitar una key de acceso a las cuentas")
 async def get_key(interaction: discord.Interaction):
@@ -1064,7 +1072,7 @@ async def cuenta_command(interaction: discord.Interaction):
         )
         embed.add_field(name='📧 Correo | Email', value=f'`{account["gmail"]}`', inline=False)
         embed.add_field(name='🔒 Contraseña | Password', value=f'`{account["password"]}`', inline=False)
-        embed.set_footer(text='HMFB X |⚠️ No todas las cuentas Funcionan (Algunas son bloqueadas por Microsoft)')
+        embed.set_footer(text='HMFB X | ¡Disfruta tu cuenta! | Enjoy your account!')
         
         await interaction.user.send(embed=embed)
         
@@ -1516,15 +1524,30 @@ async def add_account_error(ctx,error):
 @commands.has_permissions(administrator=True)
 async def sync_commands(ctx):
     try:
+        # Limpiar comandos globales primero
+        bot.tree.clear_commands(guild=None)
+        
+        # Sincronizar comandos
         synced = await bot.tree.sync()
+        
         embed = discord.Embed(
             title="✅ Comandos Sincronizados | Commands Synced",
             description=f"Sincronizados {len(synced)} comandos de barra | Synced {len(synced)} slash commands",
             color=discord.Color.green()
         )
+        
+        # Listar comandos sincronizados
+        commands_list = [command.name for command in bot.tree.get_commands()]
+        embed.add_field(
+            name="📝 Comandos Disponibles | Available Commands",
+            value=", ".join([f"`/{cmd}`" for cmd in commands_list]),
+            inline=False
+        )
+        
         embed.set_footer(text="HMFB X")
         await ctx.send(embed=embed)
         print(f"Comandos sincronizados: {len(synced)}")
+        print(f"Comandos disponibles: {', '.join(commands_list)}")
     except Exception as e:
         embed = discord.Embed(
             title="❌ Error de Sincronización | Sync Error",
