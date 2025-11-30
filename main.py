@@ -14,7 +14,7 @@ import re
 # --- Configuración Inicial ---
 TOKEN = os.environ['DISCORD_TOKEN']
 CHANNEL_ID = int(os.environ['CHANNEL_ID'])
-DISTRIBUTION_INTERVAL_MINUTES = 30.0
+DISTRIBUTION_INTERVAL_MINUTES = 10.0
 
 # *** CORREGIDO: Canal separado para solicitudes de Admins ***
 try:
@@ -30,10 +30,10 @@ try:
     VERIFICATION_EMOJI = os.environ.get('VERIFICATION_EMOJI', '✅')
     VERIFICATION_IMAGE_URL = os.environ.get('VERIFICATION_IMAGE_URL', '')
 except (KeyError, ValueError):
-    VERIFICATION_CHANNEL_ID =1444476201270771843
-    VERIFICATION_ROLE_ID =1444480681991471204
+    VERIFICATION_CHANNEL_ID = None
+    VERIFICATION_ROLE_ID = None
     VERIFICATION_EMOJI = '✅'
-    VERIFICATION_IMAGE_URL = 'https://media.discordapp.net/attachments/1444072962729840722/1444089581128384522/pe.webp?ex=692cc23a&is=692b70ba&hm=a019c6f38ca3b57dd320ae272bc23a741e5dd268175b03f2eb74e9eef8b4ced0&=&format=webp&width=300&height=300'
+    VERIFICATION_IMAGE_URL = ''
     print("❌ Configuración de verificación no encontrada")
 
 # --- Rutas de Archivos ---
@@ -603,14 +603,43 @@ async def distribute_account():
         accounts_data['available'].insert(0, account_to_distribute)
         return
 
+    # EMBED BILINGÜE PARA DISTRIBUCIÓN DE CUENTAS
     embed = discord.Embed(
-        title=f"✨ Cuenta Disponible | Correo: {account_to_distribute['gmail']} ✨",
-        description="¡Se ha liberado una cuenta! Reacciona para indicar su estado:",
+        title=f"✨ Cuenta Disponible | Available Account ✨",
         color=discord.Color.dark_green()
     )
-    embed.add_field(name="📧 Correo (Microsoft)", value=f"`{account_to_distribute['gmail']}`", inline=False)
-    embed.add_field(name="🔒 Contraseña", value=f"`{account_to_distribute['password']}`", inline=False)
-    embed.set_footer(text=f"Reacciona: ✅ Usada | ❌ Error Credenciales | 🚨 Cuenta No Sirve/Bloqueada | {len(accounts_data['available'])} restantes.")
+    
+    # Sección en Español
+    embed.add_field(
+        name="🇪🇸 Español",
+        value=(
+            f"**¡Se ha liberado una cuenta!**\n"
+            f"**Correo:** `{account_to_distribute['gmail']}`\n"
+            f"**Contraseña:** `{account_to_distribute['password']}`\n\n"
+            "**Reacciona para indicar su estado:**\n"
+            "✅ **Usada** - La cuenta funciona correctamente\n"
+            "❌ **Error Credenciales** - Contraseña incorrecta\n"
+            "🚨 **Cuenta No Sirve/Bloqueada** - Problemas con la cuenta"
+        ),
+        inline=False
+    )
+    
+    # Sección en Inglés
+    embed.add_field(
+        name="🇺🇸 English",
+        value=(
+            f"**An account has been released!**\n"
+            f"**Email:** `{account_to_distribute['gmail']}`\n"
+            f"**Password:** `{account_to_distribute['password']}`\n\n"
+            "**React to indicate its status:**\n"
+            "✅ **Used** - Account works correctly\n"
+            "❌ **Credential Error** - Wrong password\n"
+            "🚨 **Account Not Working/Banned** - Account issues"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text=f"HMFB X | {len(accounts_data['available'])} cuentas restantes | {len(accounts_data['available'])} accounts remaining")
 
     try:
         message = await channel.send(embed=embed)
@@ -632,7 +661,7 @@ async def distribute_account():
 
 @bot.event
 async def on_reaction_add(reaction, user):
-    """Maneja las reacciones a los mensajes de distribución."""
+    """Maneja las reacciones a los mensajes de distribución - EVITA ACUMULACIÓN."""
     if user.bot:
         return
 
@@ -647,14 +676,54 @@ async def on_reaction_add(reaction, user):
 
     for account in accounts_data['distributed']:
         if account.get('message_id') == message_id:
+            # VERIFICAR SI EL USUARIO YA REACCIONÓ Y ELIMINAR REACCIONES ANTERIORES
             if user_id in account['reactions']['users']:
-                await reaction.remove(user)
-                return
-
-            account['reactions']['users'].append(user_id)
-            account['reactions'][reacted_emoji] += 1
+                # El usuario ya reaccionó, eliminar todas sus reacciones anteriores
+                try:
+                    # Obtener todas las reacciones del mensaje
+                    message = await reaction.message.channel.fetch_message(message_id)
+                    for r in message.reactions:
+                        async for reactor in r.users():
+                            if reactor.id == user_id and str(r.emoji) != reacted_emoji:
+                                # Eliminar reacciones anteriores del mismo usuario
+                                await message.remove_reaction(r.emoji, user)
+                except Exception as e:
+                    print(f"Error eliminando reacciones anteriores: {e}")
+                
+                # Actualizar el conteo - restar reacciones anteriores
+                for emoji in valid_emojis:
+                    if emoji in account['reactions'] and user_id in account['reactions']['users']:
+                        account['reactions'][emoji] = max(0, account['reactions'][emoji] - 1)
+                
+                # Agregar la nueva reacción
+                account['reactions'][reacted_emoji] += 1
+            else:
+                # Usuario reacciona por primera vez
+                account['reactions']['users'].append(user_id)
+                account['reactions'][reacted_emoji] += 1
+            
             save_accounts()
             return
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    """Maneja cuando se remueven reacciones para mantener consistencia."""
+    if payload.user_id == bot.user.id:
+        return
+    
+    # Verificar si es una reacción de distribución
+    if payload.channel_id == CHANNEL_ID and str(payload.emoji) in ["✅","❌", "🚨"]:
+        message_id = payload.message_id
+        removed_emoji = str(payload.emoji)
+        user_id = payload.user_id
+
+        for account in accounts_data['distributed']:
+            if account.get('message_id') == message_id:
+                if user_id in account['reactions']['users']:
+                    account['reactions'][removed_emoji] = max(0, account['reactions'][removed_emoji] - 1)
+                    # No removemos al usuario de la lista para evitar que reaccione múltiples veces
+                    save_accounts()
+                    return
 
 # NUEVO EVENTO: Manejo de reacciones para verificación
 @bot.event
@@ -675,6 +744,10 @@ async def on_raw_reaction_add(payload):
             return
         
         try:
+            # Verificar si ya tiene el rol
+            if role in member.roles:
+                return
+                
             # Asignar el rol de verificación
             await member.add_roles(role)
             print(f"✅ Usuario verificado: {member.display_name}")
@@ -712,7 +785,7 @@ async def on_raw_reaction_add(payload):
                     inline=False
                 )
                 
-                welcome_embed.set_footer(text="Sistema de Verificación | Verification System")
+                welcome_embed.set_footer(text="HMFB X | Sistema de Verificación | Verification System")
                 
                 await member.send(embed=welcome_embed)
                 print(f"📩 Mensaje de bienvenida enviado a: {member.display_name}")
@@ -767,32 +840,52 @@ async def generate_key_command(interaction: discord.Interaction, tiempo: str = "
         keys_data['keys'][new_key] = key_data
         save_keys()
         
+        # EMBED BILINGÜE PARA KEY GENERADA
         embed = discord.Embed(
-            title='🔑 Nueva Key Generada',
-            description=f'**Key:** `{new_key}`',
+            title='🔑 Nueva Key Generada | New Key Generated',
             color=discord.Color.green()
         )
-        embed.add_field(name='Creada por', value=interaction.user.mention, inline=True)
+        embed.add_field(name='🔑 Key', value=f'`{new_key}`', inline=False)
+        embed.add_field(name='👤 Creada por | Created by', value=interaction.user.mention, inline=True)
         
         if expires_at:
-            embed.add_field(name='⏰ Expira', value=f'<t:{int(expires_at.timestamp())}:R>', inline=True)
-            embed.add_field(name='Duración', value=readable_time, inline=True)
-            embed.add_field(name='Estado', value='🟢 ACTIVA (Temporal)', inline=False)
+            embed.add_field(name='⏰ Expira | Expires', value=f'<t:{int(expires_at.timestamp())}:R>', inline=True)
+            embed.add_field(name='⏱️ Duración | Duration', value=readable_time, inline=True)
+            embed.add_field(name='📊 Estado | Status', value='🟢 ACTIVA (Temporal) | ACTIVE (Temporary)', inline=False)
         else:
-            embed.add_field(name='⏰ Expira', value='Nunca', inline=True)
-            embed.add_field(name='Estado', value='🟢 ACTIVA (Permanente)', inline=False)
+            embed.add_field(name='⏰ Expira | Expires', value='Nunca | Never', inline=True)
+            embed.add_field(name='📊 Estado | Status', value='🟢 ACTIVA (Permanente) | ACTIVE (Permanent)', inline=False)
         
-        examples = "**Ejemplos:**\n• `/key 6h` - 6 horas\n• `/key 2d12h` - 2 días y 12 horas\n• `/key 30m` - 30 minutos\n• `/key permanent` - Permanente"
-        embed.add_field(name='💡 Formatos válidos', value=examples, inline=False)
+        examples = (
+            "**Ejemplos | Examples:**\n"
+            "• `/key 6h` - 6 horas | 6 hours\n"
+            "• `/key 2d12h` - 2 días y 12 horas | 2 days and 12 hours\n"
+            "• `/key 30m` - 30 minutos | 30 minutes\n"
+            "• `/key permanent` - Permanente | Permanent"
+        )
+        embed.add_field(name='💡 Formatos válidos | Valid formats', value=examples, inline=False)
+        embed.set_footer(text="HMFB X")
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
         
     except ValueError as e:
-        await interaction.response.send_message(
-            f'❌ Formato de tiempo inválido. Usa: `6s`, `6m`, `6h`, `6d`, `1h30m`, `2d12h` o `permanent`\n'
-            f'**Ejemplos:**\n• `/key 6h` - 6 horas\n• `/key 2d12h` - 2 días y 12 horas\n• `/key 30m` - 30 minutos\n• `/key permanent` - Permanente',
-            ephemeral=True
+        error_embed = discord.Embed(
+            title="❌ Formato de tiempo inválido | Invalid time format",
+            color=discord.Color.red()
         )
+        error_embed.add_field(
+            name="💡 Formatos válidos | Valid formats",
+            value=(
+                "Usa: `6s`, `6m`, `6h`, `6d`, `1h30m`, `2d12h` o `permanent`\n"
+                "**Ejemplos | Examples:**\n"
+                "• `/key 6h` - 6 horas | 6 hours\n"
+                "• `/key 2d12h` - 2 días y 12 horas | 2 days and 12 hours\n"
+                "• `/key 30m` - 30 minutos | 30 minutes\n"
+                "• `/key permanent` - Permanente | Permanent"
+            ),
+            inline=False
+        )
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
 @bot.tree.command(name="access", description="Validar tu key de acceso")
 async def access_command(interaction: discord.Interaction, key: str):
@@ -805,11 +898,11 @@ async def access_command(interaction: discord.Interaction, key: str):
         if key_info.get('expires_at'):
             expires_at = datetime.fromisoformat(key_info['expires_at'])
             if datetime.now() > expires_at:
-                await interaction.response.send_message('❌ Esta key ha expirado.', ephemeral=True)
+                await interaction.response.send_message('❌ Esta key ha expirado. | This key has expired.', ephemeral=True)
                 return
         
         if key_info['used']:
-            await interaction.response.send_message('❌ Esta key ya ha sido utilizada.', ephemeral=True)
+            await interaction.response.send_message('❌ Esta key ya ha sido utilizada. | This key has already been used.', ephemeral=True)
         else:
             key_info['used'] = True
             key_info['user_id'] = interaction.user.id
@@ -821,62 +914,86 @@ async def access_command(interaction: discord.Interaction, key: str):
             save_keys()
             
             embed = discord.Embed(
-                title='✅ Acceso Concedido',
-                description='Ahora tienes acceso al comando `/cuenta`',
+                title='✅ Acceso Concedido | Access Granted',
+                description='Ahora tienes acceso al comando `/cuenta` | You now have access to the `/cuenta` command',
                 color=discord.Color.green()
             )
             
             if key_info.get('expires_at'):
                 expires_at = datetime.fromisoformat(key_info['expires_at'])
-                embed.add_field(name='⏰ Key expira', value=f'<t:{int(expires_at.timestamp())}:R>')
+                embed.add_field(name='⏰ Key expira | Key expires', value=f'<t:{int(expires_at.timestamp())}:R>')
             
+            embed.set_footer(text="HMFB X")
             await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message('❌ Key inválida.', ephemeral=True)
+        await interaction.response.send_message('❌ Key inválida. | Invalid key.', ephemeral=True)
 
 @bot.tree.command(name="cuenta", description="Obtener una cuenta (Requiere key)")
 async def cuenta_command(interaction: discord.Interaction):
     """Obtener una cuenta del inventario"""
     if not has_access(interaction.user.id):
-        await interaction.response.send_message(
-            '❌ No tienes acceso a este comando. Usa `/get-key` para solicitar acceso.',
-            ephemeral=True
+        embed = discord.Embed(
+            title="❌ Acceso Denegado | Access Denied",
+            description=(
+                "No tienes acceso a este comando. | You don't have access to this command.\n"
+                "Usa `/get-key` para solicitar acceso. | Use `/get-key` to request access."
+            ),
+            color=discord.Color.red()
         )
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
     if not accounts_data['available']:
-        await interaction.response.send_message(
-            '❌ No hay cuentas disponibles en este momento.',
-            ephemeral=True
+        embed = discord.Embed(
+            title="❌ Sin Stock | Out of Stock",
+            description=(
+                "No hay cuentas disponibles en este momento. | No accounts available at the moment.\n"
+                "Vuelve a intentarlo más tarde. | Please try again later."
+            ),
+            color=discord.Color.orange()
         )
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
     account = accounts_data['available'].pop(0)
     save_accounts()
     
     try:
+        # EMBED BILINGÜE PARA CUENTA OBTENIDA
         embed = discord.Embed(
-            title='📧 Cuenta Obtenida',
-            description='Aquí tienes tu cuenta:',
+            title='📧 Cuenta Obtenida | Account Obtained',
+            description='Aquí tienes tu cuenta: | Here is your account:',
             color=discord.Color.blue()
         )
-        embed.add_field(name='📧 Correo', value=f'`{account["gmail"]}`', inline=False)
-        embed.add_field(name='🔒 Contraseña', value=f'`{account["password"]}`', inline=False)
-        embed.set_footer(text='¡Disfruta tu cuenta!')
+        embed.add_field(name='📧 Correo | Email', value=f'`{account["gmail"]}`', inline=False)
+        embed.add_field(name='🔒 Contraseña | Password', value=f'`{account["password"]}`', inline=False)
+        embed.set_footer(text='HMFB X | ¡Disfruta tu cuenta! | Enjoy your account!')
         
         await interaction.user.send(embed=embed)
-        await interaction.response.send_message(
-            '✅ Tu cuenta ha sido enviada por mensaje privado.',
-            ephemeral=True
+        
+        success_embed = discord.Embed(
+            title="✅ Cuenta Enviada | Account Sent",
+            description="Tu cuenta ha sido enviada por mensaje privado. | Your account has been sent via private message.",
+            color=discord.Color.green()
         )
+        success_embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=success_embed, ephemeral=True)
         
         update_log(account, "CLAIMED")
         
     except discord.Forbidden:
-        await interaction.response.send_message(
-            '❌ No puedo enviarte mensajes privados. Activa tus DMs y vuelve a intentarlo.',
-            ephemeral=True
+        error_embed = discord.Embed(
+            title="❌ Error de DM | DM Error",
+            description=(
+                "No puedo enviarte mensajes privados. | I can't send you private messages.\n"
+                "Activa tus DMs y vuelve a intentarlo. | Enable your DMs and try again."
+            ),
+            color=discord.Color.red()
         )
+        error_embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
         accounts_data['available'].insert(0, account)
         save_accounts()
 
@@ -886,19 +1003,27 @@ async def cuenta_command(interaction: discord.Interaction):
 async def verify_setup(interaction: discord.Interaction):
     """Crea el embed de verificación con reacción - VERSIÓN BILINGÜE"""
     if not VERIFICATION_CHANNEL_ID or not VERIFICATION_ROLE_ID:
-        await interaction.response.send_message(
-            "❌ El sistema de verificación no está configurado correctamente. "
-            "Verifica las variables de entorno VERIFICATION_CHANNEL_ID y VERIFICATION_ROLE_ID.",
-            ephemeral=True
+        embed = discord.Embed(
+            title="❌ Error de Configuración | Configuration Error",
+            description=(
+                "El sistema de verificación no está configurado correctamente. | The verification system is not properly configured.\n"
+                "Verifica las variables de entorno VERIFICATION_CHANNEL_ID y VERIFICATION_ROLE_ID. | Check VERIFICATION_CHANNEL_ID and VERIFICATION_ROLE_ID environment variables."
+            ),
+            color=discord.Color.red()
         )
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
     verification_channel = bot.get_channel(VERIFICATION_CHANNEL_ID)
     if not verification_channel:
-        await interaction.response.send_message(
-            "❌ No se pudo encontrar el canal de verificación.",
-            ephemeral=True
+        embed = discord.Embed(
+            title="❌ Canal No Encontrado | Channel Not Found",
+            description="No se pudo encontrar el canal de verificación. | Could not find the verification channel.",
+            color=discord.Color.red()
         )
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
     try:
@@ -937,25 +1062,31 @@ async def verify_setup(interaction: discord.Interaction):
         if VERIFICATION_IMAGE_URL:
             embed.set_image(url=VERIFICATION_IMAGE_URL)
         
-        embed.set_footer(text="Sistema de Verificación Automática | Automatic Verification System")
+        embed.set_footer(text="HMFB X")
         
         message = await verification_channel.send(embed=embed)
         await message.add_reaction(VERIFICATION_EMOJI)
         
-        await interaction.response.send_message(
-            f"✅ Sistema de verificación configurado correctamente en {verification_channel.mention}",
-            ephemeral=True
+        success_embed = discord.Embed(
+            title="✅ Sistema Configurado | System Configured",
+            description=f"Sistema de verificación configurado correctamente en {verification_channel.mention} | Verification system successfully configured in {verification_channel.mention}",
+            color=discord.Color.green()
         )
+        success_embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=success_embed, ephemeral=True)
         
         print(f"✅ Sistema de verificación BILINGÜE configurado por {interaction.user.name}")
         
     except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Error al configurar la verificación: {str(e)}",
-            ephemeral=True
+        error_embed = discord.Embed(
+            title="❌ Error | Error",
+            description=f"Error al configurar la verificación: {str(e)} | Error setting up verification: {str(e)}",
+            color=discord.Color.red()
         )
+        error_embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
-# NUEVO COMANDO: Sistema de roles temporales
+# NUEVO COMANDO: Sistema de roles temporales BILINGÜE
 @bot.tree.command(name="rol", description="Asigna un rol temporal a un usuario (Admin)")
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(
@@ -964,50 +1095,67 @@ async def verify_setup(interaction: discord.Interaction):
     tiempo="Duración del rol (ej: 1h, 30m, 2d, 1h30m)"
 )
 async def temporary_role(interaction: discord.Interaction, usuario: discord.Member, rol: discord.Role, tiempo: str):
-    """Asigna un rol temporal a un usuario"""
+    """Asigna un rol temporal a un usuario - VERSIÓN BILINGÜE"""
     try:
         # Verificar que el bot puede gestionar el rol
         bot_member = interaction.guild.me
         if rol.position >= bot_member.top_role.position:
-            await interaction.response.send_message(
-                f"❌ No puedo asignar el rol **{rol.name}** porque está por encima o igual a mi rol más alto ({bot_member.top_role.name}).\n"
-                f"**Solución:** Mueve mi rol ({bot_member.top_role.name}) por encima del rol {rol.name} en la configuración del servidor.",
-                ephemeral=True
+            embed = discord.Embed(
+                title="❌ Error de Permisos | Permission Error",
+                description=(
+                    f"No puedo asignar el rol **{rol.name}** porque está por encima o igual a mi rol más alto ({bot_member.top_role.name}).\n"
+                    f"**Solución | Solution:** Mueve mi rol ({bot_member.top_role.name}) por encima del rol {rol.name} en la configuración del servidor. | Move my role ({bot_member.top_role.name}) above the {rol.name} role in server settings."
+                ),
+                color=discord.Color.red()
             )
+            embed.set_footer(text="HMFB X")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         # Verificar que el usuario que ejecuta el comando puede asignar el rol
         if rol.position >= interaction.user.top_role.position and interaction.user != interaction.guild.owner:
-            await interaction.response.send_message(
-                f"❌ No puedes asignar el rol **{rol.name}** porque está por encima o igual a tu rol más alto.",
-                ephemeral=True
+            embed = discord.Embed(
+                title="❌ Error de Permisos | Permission Error",
+                description=f"No puedes asignar el rol **{rol.name}** porque está por encima o igual a tu rol más alto. | You cannot assign the **{rol.name}** role because it is above or equal to your highest role.",
+                color=discord.Color.red()
             )
+            embed.set_footer(text="HMFB X")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         # Verificar que no se asigne a bots
         if usuario.bot:
-            await interaction.response.send_message(
-                "❌ No puedes asignar roles temporales a bots.",
-                ephemeral=True
+            embed = discord.Embed(
+                title="❌ Error | Error",
+                description="No puedes asignar roles temporales a bots. | You cannot assign temporary roles to bots.",
+                color=discord.Color.red()
             )
+            embed.set_footer(text="HMFB X")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         # Parsear el tiempo
         total_seconds, readable_time = parse_time_string(tiempo)
         
         if total_seconds <= 0:
-            await interaction.response.send_message(
-                "❌ El tiempo debe ser mayor a 0. Usa formatos como: 1h, 30m, 2d, 1h30m",
-                ephemeral=True
+            embed = discord.Embed(
+                title="❌ Tiempo Inválido | Invalid Time",
+                description="El tiempo debe ser mayor a 0. Usa formatos como: 1h, 30m, 2d, 1h30m | Time must be greater than 0. Use formats like: 1h, 30m, 2d, 1h30m",
+                color=discord.Color.red()
             )
+            embed.set_footer(text="HMFB X")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         # Verificar si el usuario ya tiene el rol
         if rol in usuario.roles:
-            await interaction.response.send_message(
-                f"ℹ️ El usuario {usuario.mention} ya tiene el rol {rol.mention}.",
-                ephemeral=True
+            embed = discord.Embed(
+                title="ℹ️ Información | Information",
+                description=f"El usuario {usuario.mention} ya tiene el rol {rol.mention}. | The user {usuario.mention} already has the {rol.mention} role.",
+                color=discord.Color.blue()
             )
+            embed.set_footer(text="HMFB X")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
         # Asignar el rol
@@ -1029,29 +1177,30 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
         
         save_temporary_roles(data)
         
-        # Crear embed de confirmación
+        # Crear embed de confirmación BILINGÜE
         embed = discord.Embed(
-            title="✅ Rol Temporal Asignado",
-            description=f"Se ha asignado el rol {rol.mention} a {usuario.mention}",
+            title="✅ Rol Temporal Asignado | Temporary Role Assigned",
+            description=f"Se ha asignado el rol {rol.mention} a {usuario.mention} | The role {rol.mention} has been assigned to {usuario.mention}",
             color=discord.Color.green()
         )
-        embed.add_field(name="⏰ Duración", value=readable_time, inline=True)
-        embed.add_field(name="🕒 Expira", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=True)
-        embed.add_field(name="👤 Asignado por", value=interaction.user.mention, inline=True)
+        embed.add_field(name="⏰ Duración | Duration", value=readable_time, inline=True)
+        embed.add_field(name="🕒 Expira | Expires", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=True)
+        embed.add_field(name="👤 Asignado por | Assigned by", value=interaction.user.mention, inline=True)
+        embed.set_footer(text="HMFB X")
         
         await interaction.response.send_message(embed=embed)
         
-        # Enviar DM al usuario (opcional)
+        # Enviar DM al usuario (opcional) - BILINGÜE
         try:
             user_embed = discord.Embed(
-                title="🎭 Rol Temporal Asignado",
-                description=f"Has recibido un rol temporal en **{interaction.guild.name}**",
+                title="🎭 Rol Temporal Asignado | Temporary Role Assigned",
+                description=f"Has recibido un rol temporal en **{interaction.guild.name}** | You have received a temporary role in **{interaction.guild.name}**",
                 color=rol.color
             )
-            user_embed.add_field(name="Rol", value=rol.name, inline=True)
-            user_embed.add_field(name="Duración", value=readable_time, inline=True)
-            user_embed.add_field(name="Expira", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=False)
-            user_embed.set_footer(text="Este rol se eliminará automáticamente cuando expire el tiempo")
+            user_embed.add_field(name="🎯 Rol | Role", value=rol.name, inline=True)
+            user_embed.add_field(name="⏱️ Duración | Duration", value=readable_time, inline=True)
+            user_embed.add_field(name="🕒 Expira | Expires", value=f"<t:{int((datetime.now() + timedelta(seconds=total_seconds)).timestamp())}:R>", inline=False)
+            user_embed.set_footer(text="HMFB X | Este rol se eliminará automáticamente cuando expire el tiempo | This role will be automatically removed when the time expires")
             
             await usuario.send(embed=user_embed)
         except:
@@ -1060,33 +1209,46 @@ async def temporary_role(interaction: discord.Interaction, usuario: discord.Memb
         print(f"🔹 Rol temporal asignado: {rol.name} a {usuario.name} por {interaction.user.name}")
         
     except ValueError as e:
-        await interaction.response.send_message(
-            f"❌ Formato de tiempo inválido: {str(e)}\n"
-            "Usa formatos como: `1h`, `30m`, `2d`, `1h30m`",
-            ephemeral=True
+        embed = discord.Embed(
+            title="❌ Formato de Tiempo Inválido | Invalid Time Format",
+            description=(
+                f"Formato de tiempo inválido: {str(e)}\n"
+                "Usa formatos como: `1h`, `30m`, `2d`, `1h30m` | Use formats like: `1h`, `30m`, `2d`, `1h30m`"
+            ),
+            color=discord.Color.red()
         )
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     except discord.Forbidden as e:
-        error_msg = (
-            f"❌ **Error de permisos:** No tengo permisos para asignar el rol {rol.mention}\n\n"
-            f"**Verifica que:**\n"
-            f"• Mi rol ({interaction.guild.me.top_role.name}) esté **POR ENCIMA** del rol {rol.name}\n"
-            f"• Tenga el permiso **'Gestionar Roles'** activado\n"
-            f"• El rol {rol.name} no esté marcado como **'Administrador'**"
+        embed = discord.Embed(
+            title="❌ Error de Permisos | Permission Error",
+            description=(
+                f"**Error de permisos:** No tengo permisos para asignar el rol {rol.mention}\n\n"
+                f"**Verifica que | Check that:**\n"
+                f"• Mi rol ({interaction.guild.me.top_role.name}) esté **POR ENCIMA** del rol {rol.name} | My role ({interaction.guild.me.top_role.name}) is **ABOVE** the {rol.name} role\n"
+                f"• Tenga el permiso **'Gestionar Roles'** activado | I have the **'Manage Roles'** permission enabled\n"
+                f"• El rol {rol.name} no esté marcado como **'Administrador'** | The {rol.name} role is not marked as **'Administrator'**"
+            ),
+            color=discord.Color.red()
         )
-        await interaction.response.send_message(error_msg, ephemeral=True)
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         print(f"❌ Error de permisos al asignar rol: {e}")
     except Exception as e:
-        await interaction.response.send_message(
-            f"❌ Error al asignar el rol temporal: {str(e)}",
-            ephemeral=True
+        embed = discord.Embed(
+            title="❌ Error | Error",
+            description=f"Error al asignar el rol temporal: {str(e)} | Error assigning temporary role: {str(e)}",
+            color=discord.Color.red()
         )
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         print(f"❌ Error inesperado en comando /rol: {e}")
 
-# NUEVO COMANDO: Ver roles temporales activos
+# NUEVO COMANDO: Ver roles temporales activos BILINGÜE
 @bot.tree.command(name="roles-temporales", description="Muestra los roles temporales activos (Admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def show_temporary_roles(interaction: discord.Interaction):
-    """Muestra los roles temporales activos en el servidor"""
+    """Muestra los roles temporales activos en el servidor - VERSIÓN BILINGÜE"""
     data = load_temporary_roles()
     active_roles = []
     
@@ -1105,12 +1267,18 @@ async def show_temporary_roles(interaction: discord.Interaction):
                 })
     
     if not active_roles:
-        await interaction.response.send_message("ℹ️ No hay roles temporales activos en este servidor.", ephemeral=True)
+        embed = discord.Embed(
+            title="ℹ️ Sin Roles Temporales | No Temporary Roles",
+            description="No hay roles temporales activos en este servidor. | There are no active temporary roles in this server.",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="HMFB X")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
     
     embed = discord.Embed(
-        title="⏰ Roles Temporales Activos",
-        description=f"**{len(active_roles)}** roles temporales activos",
+        title="⏰ Roles Temporales Activos | Active Temporary Roles",
+        description=f"**{len(active_roles)}** roles temporales activos | **{len(active_roles)}** active temporary roles",
         color=discord.Color.blue()
     )
     
@@ -1118,15 +1286,17 @@ async def show_temporary_roles(interaction: discord.Interaction):
         embed.add_field(
             name=f"#{i+1} {temp_role['user'].display_name}",
             value=(
-                f"**Rol:** {temp_role['role'].mention}\n"
-                f"**Expira:** <t:{int(temp_role['expires_at'].timestamp())}:R>\n"
-                f"**Asignado por:** {temp_role['assigned_by'].mention if temp_role['assigned_by'] else 'N/A'}"
+                f"**🎯 Rol | Role:** {temp_role['role'].mention}\n"
+                f"**🕒 Expira | Expires:** <t:{int(temp_role['expires_at'].timestamp())}:R>\n"
+                f"**👤 Asignado por | Assigned by:** {temp_role['assigned_by'].mention if temp_role['assigned_by'] else 'N/A'}"
             ),
             inline=False
         )
     
     if len(active_roles) > 10:
-        embed.set_footer(text=f"Y {len(active_roles) - 10} roles más...")
+        embed.set_footer(text=f"HMFB X | Y {len(active_roles) - 10} roles más... | And {len(active_roles) - 10} more roles...")
+    else:
+        embed.set_footer(text="HMFB X")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1138,10 +1308,16 @@ async def add_account(ctx, email: str, password: str):
     email_lower = email.lower()
 
     if email_lower in registered_emails:
-        await ctx.send(f"❌ La cuenta con correo **{email}** ya existe en el inventario.")
+        embed = discord.Embed(
+            title="❌ Cuenta Existente | Existing Account",
+            description=f"La cuenta con correo **{email}** ya existe en el inventario. | The account with email **{email}** already exists in the inventory.",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text="HMFB X")
+        await ctx.send(embed=embed)
         return
 
-    await ctx.send("✅ Recibida la información.")
+    await ctx.send("✅ Recibida la información. | Information received.")
 
     new_account = {'username':email,'gmail':email,'password':password}
     accounts_data['available'].append(new_account)
@@ -1150,13 +1326,14 @@ async def add_account(ctx, email: str, password: str):
     update_log(new_account,"ADDED")
 
     embed = discord.Embed(
-        title="✅ Cuenta Añadida",
-        description="La cuenta ha sido añadida al inventario y está lista para ser distribuida.",
+        title="✅ Cuenta Añadida | Account Added",
+        description="La cuenta ha sido añadida al inventario y está lista para ser distribuida. | The account has been added to the inventory and is ready for distribution.",
         color=discord.Color.blue()
     )
-    embed.add_field(name="📧 Correo (Microsoft)", value=email)
-    embed.add_field(name="🔒 Contraseña", value=password)
-    embed.add_field(name="Inventario Total", value=f"{len(accounts_data['available'])} disponibles")
+    embed.add_field(name="📧 Correo (Microsoft) | Email (Microsoft)", value=email)
+    embed.add_field(name="🔒 Contraseña | Password", value=password)
+    embed.add_field(name="📊 Inventario Total | Total Inventory", value=f"{len(accounts_data['available'])} disponibles | {len(accounts_data['available'])} available")
+    embed.set_footer(text="HMFB X")
     await ctx.send(embed=embed)
 
 @bot.command(name='importaccounts', help='Importa varias cuentas desde archivo import_accounts.txt con formato: correo:contraseña')
@@ -1164,10 +1341,23 @@ async def add_account(ctx, email: str, password: str):
 async def import_accounts(ctx):
     file_path = "import_accounts.txt"
     if not os.path.exists(file_path):
-        await ctx.send(f"❌ No se encontró el archivo {file_path}. Asegúrate de crearlo con formato `correo:contraseña` por línea.")
+        embed = discord.Embed(
+            title="❌ Archivo No Encontrado | File Not Found",
+            description=f"No se encontró el archivo {file_path}. Asegúrate de crearlo con formato `correo:contraseña` por línea. | File {file_path} not found. Make sure to create it with `email:password` format per line.",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text="HMFB X")
+        await ctx.send(embed=embed)
         return
 
-    await ctx.send("⏳ Importando cuentas...")
+    embed = discord.Embed(
+        title="⏳ Importando Cuentas | Importing Accounts",
+        description="El proceso de importación ha comenzado... | The import process has started...",
+        color=discord.Color.orange()
+    )
+    embed.set_footer(text="HMFB X")
+    await ctx.send(embed=embed)
+    
     success_count = 0
     fail_count = 0
     duplicate_count = 0
@@ -1210,25 +1400,60 @@ async def import_accounts(ctx):
     if remaining_lines:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(remaining_lines) + '\n')
-        await ctx.send(f"⚠️ **{fail_count}** líneas con formato incorrecto. Quedan en `{file_path}` para corrección.")
+        await ctx.send(f"⚠️ **{fail_count}** líneas con formato incorrecto. Quedan en `{file_path}` para corrección. | **{fail_count}** lines with incorrect format. Remain in `{file_path}` for correction.")
     else:
         remove_import_file(file_path)
     
-    await ctx.send(
-        f"✅ Importadas **{success_count}** cuentas correctamente.\n"
-        f"🔄 Duplicadas (ya en inventario): **{duplicate_count}** (omitidas).\n"
-        f"❌ Fallidas (formato incorrecto): **{fail_count}**."
+    # EMBED BILINGÜE DE RESULTADOS
+    embed = discord.Embed(
+        title="📊 Resultados de Importación | Import Results",
+        color=discord.Color.green()
     )
+    embed.add_field(
+        name="✅ Éxitos | Successes",
+        value=f"**{success_count}** cuentas importadas correctamente | **{success_count}** accounts successfully imported",
+        inline=False
+    )
+    embed.add_field(
+        name="🔄 Duplicados | Duplicates",
+        value=f"**{duplicate_count}** cuentas ya en inventario (omitidas) | **{duplicate_count}** accounts already in inventory (skipped)",
+        inline=True
+    )
+    embed.add_field(
+        name="❌ Fallos | Failures",
+        value=f"**{fail_count}** líneas con formato incorrecto | **{fail_count}** lines with incorrect format",
+        inline=True
+    )
+    embed.set_footer(text="HMFB X")
+    await ctx.send(embed=embed)
 
 @add_account.error
 async def add_account_error(ctx,error):
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ Uso incorrecto: `!addaccount <correo_completo> <contraseña>`")
+        embed = discord.Embed(
+            title="❌ Uso Incorrecto | Incorrect Usage",
+            description="Uso incorrecto: `!addaccount <correo_completo> <contraseña>` | Incorrect usage: `!addaccount <complete_email> <password>`",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text="HMFB X")
+        await ctx.send(embed=embed)
     elif isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Permiso denegado. Solo administradores pueden usar este comando.")
+        embed = discord.Embed(
+            title="❌ Permiso Denegado | Permission Denied",
+            description="Permiso denegado. Solo administradores pueden usar este comando. | Permission denied. Only administrators can use this command.",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text="HMFB X")
+        await ctx.send(embed=embed)
     else:
         print(f"Error inesperado en add_account: {error}")
-        await ctx.send("❌ Error al añadir la cuenta. Revisa la consola para más detalles.")
+        embed = discord.Embed(
+            title="❌ Error | Error",
+            description="Error al añadir la cuenta. Revisa la consola para más detalles. | Error adding account. Check console for details.",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text="HMFB X")
+        await ctx.send(embed=embed)
 
 # --- Comando Sync ---
 @bot.command(name='sync')
@@ -1236,10 +1461,22 @@ async def add_account_error(ctx,error):
 async def sync_commands(ctx):
     try:
         synced = await bot.tree.sync()
-        await ctx.send(f"✅ Sincronizados {len(synced)} comandos de barra")
+        embed = discord.Embed(
+            title="✅ Comandos Sincronizados | Commands Synced",
+            description=f"Sincronizados {len(synced)} comandos de barra | Synced {len(synced)} slash commands",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="HMFB X")
+        await ctx.send(embed=embed)
         print(f"Comandos sincronizados: {len(synced)}")
     except Exception as e:
-        await ctx.send(f"❌ Error sincronizando comandos: {e}")
+        embed = discord.Embed(
+            title="❌ Error de Sincronización | Sync Error",
+            description=f"Error sincronizando comandos: {e} | Error syncing commands: {e}",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text="HMFB X")
+        await ctx.send(embed=embed)
         print(f"Error sincronizando: {e}")
 
 # --- Keep Alive ---
