@@ -1,0 +1,31 @@
+# HMFB X
+
+## /access
+Validar tu key de access
+
+## /cuenta
+Obtener una cuenta (Requiere key)
+
+## /get-key
+Solicitar una key de acceso a las cuentas
+
+## /key
+Generar una key de acceso con tiempo específico (Admin)
+
+## /verify
+Configura el sistema de verificación (Admin)
+
+## /invites
+Analiza las invitaciones de un usuario (Admin)
+
+## /reset-invites
+Resetea todas las estadísticas de invitaciones (Admin)
+
+---
+
+HMFB X  
+HMFB X  
+HMFB X  
+HMFB X  
+HMFB X  
+HMFB X  
